@@ -1,6 +1,7 @@
 #include "suw.h"
 #include "config.h"
 #include <stdio.h>
+#include <string.h>
 
 int main(int argc, char* argv[]){
     bool enc = false;
@@ -8,9 +9,9 @@ int main(int argc, char* argv[]){
     file_read_result_t result;
     char *filepath;
     for(int i = 1; i < argc; i++){
-       if(strcmp("--encrypt", argv[i]) == 0){
+       if(strcmp("--encrypt", argv[i]) == 0 || strcmp("-e", argv[i]) == 0){
            enc = true;
-       }else if (strcmp("--decrypt", argv[i]) == 0) {
+       }else if (strcmp("--decrypt", argv[i]) == 0 || strcmp("-d", argv[i]) == 0) {
            enc = false;
        }else{
            filepath = argv[i];
