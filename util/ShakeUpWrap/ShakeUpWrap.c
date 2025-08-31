@@ -7,7 +7,6 @@
 
 int main(int argc, char* argv[]){
     bool enc = false;
-    file_buffer_t buffer;
     file_read_result_t result;
     char *filepath;
     for(int i = 1; i < argc; i++){
@@ -20,13 +19,11 @@ int main(int argc, char* argv[]){
        }
     }
 
-    result = read_large_file(filepath, &buffer);
-    printf("%s\n", get_error_message(result));
     if(enc){
-        result = encrypt(&buffer);
+        result = encrypt(filepath);
         printf("%s\n", get_error_message(result));
     }else{
-        result = decrypt(&buffer);
+        result = decrypt(filepath);
         printf("%s\n", get_error_message(result));
     }
     return result;

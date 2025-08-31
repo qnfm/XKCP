@@ -13,9 +13,6 @@ http://creativecommons.org/publicdomain/zero/1.0/
 */
 
 #include "config.h"
-#ifdef XKCP_has_ShakingUpAE
-void testShakingUpAE(void);
-#endif
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,8 +21,7 @@ void testShakingUpAE(void);
 #include <stdint.h>
 #include <sys/stat.h>
 #include <libgen.h>
-#define MAX_FILE_SIZE (1024ULL * 1024ULL * 1024ULL * 1024ULL)  /* 1TB */
-#define MIN_FILE_SIZE (100ULL * 1024ULL * 1024ULL * 1024ULL)  /* 100GB */
+
 #define CHUNK_SIZE (64ULL * 1024ULL * 1024ULL)                /* 64MB chunks */
 
 typedef enum {
@@ -40,21 +36,7 @@ typedef enum {
     FILE_READ_ERROR_SIZE_OVERFLOW = -8
 } file_read_result_t;
 
-typedef struct {
-    char    *filepath;
-    char    *filename;
-    uint8_t *data;
-    uint64_t size;
-    int is_valid;
-} file_buffer_t;
-
-file_read_result_t read_large_file(const char *filepath, file_buffer_t *buffer);
-
 const char* get_error_message(file_read_result_t error_code);
 
-file_read_result_t dump_buffer_to_file(const file_buffer_t *buffer);
-
-static file_read_result_t get_file_size(const char *filepath, uint64_t *file_size);
-
-int encrypt(file_buffer_t *buf);
-int decrypt(file_buffer_t *buf);
+int encrypt(const char *path);
+int decrypt(const char *path);
