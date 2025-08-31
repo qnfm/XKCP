@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <string.h>
 
+// make clean && make AVX512/ShakeUpWrap -j$(nproc)
+
 int main(int argc, char* argv[]){
     bool enc = false;
     file_buffer_t buffer;
