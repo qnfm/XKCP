@@ -102,6 +102,12 @@ http://creativecommons.org/publicdomain/zero/1.0/
         <h>util/KeccakSum/base64.h</h>
     </fragment>
 
+    <fragment name="ShakeUpWrap" inherits="ShakingUpAE">
+        <c>util/ShakeUpWrap/ShakeUpWrap.c</c>
+        <c>util/ShakeUpWrap/suw.c</c>
+        <h>util/ShakeUpWrap/suw.h</h>
+    </fragment>
+
     <!-- To make a library -->
     <fragment name="libXKCP.a" inherits="All"/>
     <fragment name="libXKCP.so" inherits="All"/>
@@ -191,7 +197,7 @@ http://creativecommons.org/publicdomain/zero/1.0/
     <group all="XKCP">
         <product delimiter="/">
             <factor set="reference reference32bits compact generic32 generic32lc generic64 generic64lc SSSE3 AVX XOP AVX2 AVX2noAsm AVX512 AVX512noAsm x86-64 ARMv6 ARMv6M ARMv7M ARMv7A ARMv8A AVR8"/>
-            <factor set="UnitTests Benchmarks KeccakSum libXKCP.a libXKCP.so libXKCP.dylib"/>
+            <factor set="UnitTests Benchmarks KeccakSum libXKCP.a libXKCP.so libXKCP.dylib ShakeUpWrap"/>
         </product>
     </group>
 
