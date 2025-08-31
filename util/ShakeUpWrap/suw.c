@@ -19,225 +19,9 @@ http://creativecommons.org/publicdomain/zero/1.0/
 #include "ShakingUpAE.h"
 #include <assert.h>
 #include <libgen.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <string.h>
-
-static file_read_result_t get_file_size(const char *filepath, uint64_t *file_size) {
-    struct stat st;
-
-    if (filepath == NULL || file_size == NULL) {
-        return FILE_READ_ERROR_NULL_POINTER;
-    }
-
-    if (stat(filepath, &st) != 0) {
-        return FILE_READ_ERROR_FILE_NOT_FOUND;
-    }
-
-    if (st.st_size < 0) {
-        return FILE_READ_ERROR_INVALID_PATH;
-    }
-
-    *file_size = (uint64_t)st.st_size;
-
-    return FILE_READ_SUCCESS;
-}
-
-static uint8_t* safe_malloc(uint64_t size) {
-    if (size == 0 || size > SIZE_MAX) {
-        return NULL;
-    }
-
-    uint8_t *ptr = malloc((size_t)size);
-    if (ptr == NULL) {
-        return NULL;
-    }
-
-    memset(ptr, 0, (size_t)size);
-
-    return ptr;
-}
-
-file_read_result_t read_large_file(const char *filepath, file_buffer_t *buffer) {
-    FILE *file = NULL;
-    uint64_t file_size = 0;
-    uint64_t bytes_read_total = 0;
-    uint64_t chunk_size = 0;
-    size_t bytes_read_chunk = 0;
-    file_read_result_t result = FILE_READ_SUCCESS;
-
-    if (filepath == NULL || buffer == NULL) {
-        return FILE_READ_ERROR_NULL_POINTER;
-    }
-
-    buffer->filepath = (char*)filepath;
-    buffer->filename = NULL;
-    buffer->data = NULL;
-    buffer->size = 0;
-    buffer->is_valid = 0;
-
-    result = get_file_size(filepath, &file_size);
-    if (result != FILE_READ_SUCCESS) {
-        return result;
-    }
-
-    file = fopen(filepath, "rb");
-    if (file == NULL) {
-        return FILE_READ_ERROR_FILE_NOT_FOUND;
-    }
-
-    buffer->data = safe_malloc(file_size);
-    if (buffer->data == NULL) {
-        fclose(file);
-        return FILE_READ_ERROR_MEMORY_ALLOCATION;
-    }
-
-    while (bytes_read_total < file_size) {
-        uint64_t remaining = file_size - bytes_read_total;
-        chunk_size = (remaining < CHUNK_SIZE) ? remaining : CHUNK_SIZE;
-
-        if (chunk_size > SIZE_MAX) {
-            result = FILE_READ_ERROR_SIZE_OVERFLOW;
-            goto cleanup;
-        }
-
-        bytes_read_chunk = fread(buffer->data + bytes_read_total, 1,
-                                (size_t)chunk_size, file);
-
-        if (bytes_read_chunk == 0) {
-            if (ferror(file)) {
-                result = FILE_READ_ERROR_READ_FAILED;
-                goto cleanup;
-            }
-            if (bytes_read_total < file_size) {
-                result = FILE_READ_ERROR_READ_FAILED;
-                goto cleanup;
-            }
-            break;
-        }
-
-        bytes_read_total += bytes_read_chunk;
-
-        if (bytes_read_total < bytes_read_chunk) {
-            result = FILE_READ_ERROR_SIZE_OVERFLOW;
-            goto cleanup;
-        }
-    }
-
-    if (bytes_read_total != file_size) {
-        result = FILE_READ_ERROR_READ_FAILED;
-        goto cleanup;
-    }
-
-    buffer->size = file_size;
-    buffer->is_valid = 1;
-    fclose(file);
-
-    buffer->filename = basename((char*)filepath);
-    return FILE_READ_SUCCESS;
-
-cleanup:
-    if (file != NULL) {
-        fclose(file);
-    }
-    if (buffer->data != NULL) {
-        free(buffer->data);
-        buffer->data = NULL;
-    }
-    buffer->size = 0;
-    buffer->is_valid = 0;
-
-    return result;
-}
-
-file_read_result_t dump_buffer_to_file(const file_buffer_t *buffer) {
-    FILE *output_file = NULL;
-    uint64_t bytes_written_total = 0;
-    uint64_t chunk_size = 0;
-    size_t bytes_written_chunk = 0;
-    file_read_result_t result = FILE_READ_SUCCESS;
-
-    if (buffer == NULL || buffer->filepath == NULL) {
-        return FILE_READ_ERROR_NULL_POINTER;
-    }
-
-    if (!buffer->is_valid || buffer->data == NULL || buffer->size == 0) {
-        return FILE_READ_ERROR_INVALID_PATH;
-    }
-
-    output_file = fopen(buffer->filepath, "wb");
-    if (output_file == NULL) {
-        return FILE_READ_ERROR_FILE_NOT_FOUND;
-    }
-
-    printf("Dumping buffer to: %s\n", buffer->filepath);
-    printf("Writing %llu bytes (%.2f GB)...\n",
-           (unsigned long long)buffer->size,
-           (double)buffer->size / (1024.0 * 1024.0 * 1024.0));
-
-    while (bytes_written_total < buffer->size) {
-        uint64_t remaining = buffer->size - bytes_written_total;
-        chunk_size = (remaining < CHUNK_SIZE) ? remaining : CHUNK_SIZE;
-
-        if (chunk_size > SIZE_MAX) {
-            result = FILE_READ_ERROR_SIZE_OVERFLOW;
-            goto cleanup;
-        }
-
-        bytes_written_chunk = fwrite(buffer->data + bytes_written_total, 1,
-                                    (size_t)chunk_size, output_file);
-
-        if (bytes_written_chunk == 0) {
-            if (ferror(output_file)) {
-                result = FILE_READ_ERROR_READ_FAILED; /* Reuse for write error */
-                goto cleanup;
-            }
-            result = FILE_READ_ERROR_READ_FAILED;
-            goto cleanup;
-        }
-
-        if (bytes_written_chunk != (size_t)chunk_size) {
-            result = FILE_READ_ERROR_READ_FAILED;
-            goto cleanup;
-        }
-
-        bytes_written_total += bytes_written_chunk;
-
-        if (bytes_written_total < bytes_written_chunk) {
-            result = FILE_READ_ERROR_SIZE_OVERFLOW;
-            goto cleanup;
-        }
-
-        if (buffer->size > (10ULL * 1024ULL * 1024ULL * 1024ULL)) { /* > 10GB */
-            double progress = (double)bytes_written_total / (double)buffer->size * 100.0;
-            if (((bytes_written_total / CHUNK_SIZE) % 16) == 0) { /* Every 1GB */
-                printf("Progress: %.1f%% (%.2f GB written)\n", progress,
-                       (double)bytes_written_total / (1024.0 * 1024.0 * 1024.0));
-            }
-        }
-    }
-
-    if (bytes_written_total != buffer->size) {
-        result = FILE_READ_ERROR_READ_FAILED;
-        goto cleanup;
-    }
-
-    if (fflush(output_file) != 0) {
-        result = FILE_READ_ERROR_READ_FAILED;
-        goto cleanup;
-    }
-
-    printf("Successfully dumped %llu bytes to %s\n",
-           (unsigned long long)bytes_written_total, buffer->filepath);
-
-    fclose(output_file);
-    return FILE_READ_SUCCESS;
-
-cleanup:
-    if (output_file != NULL) {
-        fclose(output_file);
-    }
-
-    return result;
-}
 
 const char* get_error_message(file_read_result_t error_code) {
     switch (error_code) {
@@ -264,84 +48,141 @@ const char* get_error_message(file_read_result_t error_code) {
     }
 }
 
-int encrypt(file_buffer_t *buf){
-    KeccakWidth1600_DWrapInstance dww;
+int encrypt(const char *path){
     const unsigned int c = 512;
     unsigned int    rho     = (1600 - c - 64) /8;
     unsigned int    taglen  = c / 8;
     uint8_t         k[64] = {};
-    uint8_t         *C = safe_malloc(buf->size + taglen);
     if(getentropy(k, 64) != 0){
         printf("Fail to get entropy\n");
     }
 
+    const char * name = basename(path);
     char Kpath[200] = {};
-    strcpy(Kpath, buf->filepath);
+    strcpy(Kpath, name);
     strcat(Kpath, ".key");
-    FILE *kf= fopen(Kpath, "wb");
+    FILE *kf= fopen(Kpath, "ab");
     if (kf) {
-        if(fwrite(k, 1, 64, kf) != 64){
-            return FILE_READ_ERROR_READ_FAILED;
-        }
+        if(fwrite(k, 1, 64, kf) != 64) return FILE_READ_ERROR_READ_FAILED;
         fclose(kf);
     }
 
-    SHAKE_Wrap_Initialize(&dww, k, sizeof(k), taglen, rho, c);
-    SHAKE_Wrap_Wrap(&dww, C, buf->filename, strlen(buf->filename), buf->data, buf->size);
-
-    file_buffer_t buf_out;
-    buf_out.data = C;
-    buf_out.size = buf->size + taglen;
-    buf_out.is_valid = 1;
-
     char Cpath[200] = {};
-    strcpy(Cpath, buf->filepath);
+    strcpy(Cpath, name);
     strcat(Cpath, ".Suw");
-    buf_out.filepath = Cpath;
-    buf_out.filename = basename(Cpath);
 
-    dump_buffer_to_file(&buf_out);
-    free(buf->data);
+    FILE *input_file = fopen(path, "rb");
+    if (!input_file) {
+        perror("Error opening input file");
+        return EXIT_FAILURE;
+    }
+
+    FILE *output_file = fopen(Cpath, "ab");
+    if (!output_file) {
+          perror("Error opening output file");
+          fclose(input_file);
+          return EXIT_FAILURE;
+    }
+    KeccakWidth1600_DWrapInstance dww;
+    SHAKE_Wrap_Initialize( &dww, k, sizeof(k), taglen, rho, c );
+    uint64_t bytes_read;
+    uint64_t total_processed = 0;
+
+    uint8_t *P = malloc(CHUNK_SIZE);
+    uint8_t *C = malloc(CHUNK_SIZE + taglen);
+
+    while ((bytes_read = fread(P, 1, CHUNK_SIZE, input_file)) > 0) {
+        SHAKE_Wrap_Wrap(&dww, C, name, strlen(name), P, bytes_read);
+
+        size_t bytes_written = fwrite(C, 1, bytes_read + taglen, output_file);
+        if (bytes_written != bytes_read + taglen) {
+            perror("Error writing to output file");
+            break;
+        }
+
+        total_processed += bytes_read;
+        if (((total_processed / CHUNK_SIZE) % 16) == 0) { /* Every 1GB */
+            printf("Progress: %.2f GB written\n", (double)total_processed/ (1024.0 * 1024.0 * 1024.0));
+        }
+    }
+
+    free(P);
+    free(C);
+    fclose(input_file);
+    fclose(output_file);
+
     return FILE_READ_SUCCESS;
 }
 
-int decrypt(file_buffer_t *buf){
-    KeccakWidth1600_DWrapInstance dwu;
+int decrypt(const char *path){
     const unsigned int c = 512;
     unsigned int    rho     = (1600 - c - 64) /8;
     unsigned int    taglen  = c / 8;
     uint8_t         k[64] = {};
-    uint8_t         *P = safe_malloc(buf->size - taglen);
+
+    FILE *input_file = fopen(path, "rb");
+    if (!input_file) {
+        perror("Error opening input file");
+        return EXIT_FAILURE;
+    }
+
+    const char * Cname = basename(path);
+    uint8_t *name = malloc(strlen(path) - 4 + 1);
+    strncpy(name, Cname, strlen(Cname) + 1 - sizeof(".Suw"));
 
     char Kpath[200] = {};
-    strncpy(Kpath, buf->filepath, strlen(buf->filepath) + 1 - sizeof(".Suw"));
+    strncpy(Kpath, name, strlen(name));
     strcat(Kpath, ".key");
 
     FILE *kf= fopen(Kpath, "rb");
     if (kf) {
         if(fread(k, 1, 64, kf) != 64){
+            fclose(input_file);
+            fclose(kf);
             return FILE_READ_ERROR_READ_FAILED;
         }
         fclose(kf);
     }
-    memset(Kpath, 0, 200);
-    strncpy(Kpath, buf->filename, strlen(buf->filename) + 1 - sizeof(".Suw"));
-
-    SHAKE_Wrap_Initialize(&dwu, k, sizeof(k), taglen, rho, c);
-    SHAKE_Wrap_Unwrap(&dwu, P, Kpath, strlen(Kpath), buf->data, buf->size);
-
-    file_buffer_t buf_out;
-    buf_out.data = P;
-    buf_out.size = buf->size - taglen;
-    buf_out.is_valid = 1;
 
     memset(Kpath, 0, 200);
-    strncpy(Kpath, buf->filepath, strlen(buf->filepath) + 1 - sizeof(".Suw"));
-    buf_out.filepath = Kpath;
-    buf_out.filename = basename(Kpath);
+    strncpy(Kpath, path, strlen(path) + 1 - sizeof(".Suw"));
 
-    dump_buffer_to_file(&buf_out);
-    free(buf->data);
+    FILE *output_file = fopen(Kpath, "wb");
+    if (!output_file) {
+        perror("Error opening output file");
+        fclose(input_file);
+        return EXIT_FAILURE;
+    }
+
+    KeccakWidth1600_DWrapInstance dwu;
+    SHAKE_Wrap_Initialize( &dwu, k, sizeof(k), taglen, rho, c );
+    uint64_t bytes_read;
+    uint64_t total_processed = 0;
+
+    uint8_t *P = malloc(CHUNK_SIZE);
+    uint8_t *C = malloc(CHUNK_SIZE + taglen);
+
+    while ((bytes_read = fread(C, 1, CHUNK_SIZE + taglen, input_file)) > 0) {
+        SHAKE_Wrap_Unwrap(&dwu, P, name, strlen(name), C, bytes_read);
+
+        size_t bytes_written = fwrite(P, 1, bytes_read - taglen, output_file);
+        if (bytes_written != bytes_read - taglen) {
+            perror("Error writing to output file");
+            break;
+        }
+
+        total_processed += bytes_read;
+        if (((total_processed / CHUNK_SIZE) % 16) == 0) { /* Every 1GB */
+            printf("Progress: %.2f GB written\n", (double)total_processed/ (1024.0 * 1024.0 * 1024.0));
+        }
+    }
+
+    free(name);
+    free(P);
+    free(C);
+    fclose(input_file);
+    fclose(output_file);
+
     return FILE_READ_SUCCESS;
 }
 #endif /* XKCP_has_ShakingUpAE */
