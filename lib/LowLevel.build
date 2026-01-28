@@ -244,6 +244,10 @@ The fragments below allow to select the desired implementation of the permutatio
         <config>KeccakP1600_XOP_fullUnrolling</config>
     </fragment>
 
+    <fragment name="x86-64-SIMD-types">
+        <h>lib/low/common/SIMD-types.h</h>
+    </fragment>
+
     <fragment name="K1600-x86-64" inherits="K1600-plain-64bits-pure K1600-AVX2-pure K1600-AVX512-pure K1600x2-SSSE3-pure K1600x2-AVX512-pure K1600x4-AVX2-pure K1600x4-AVX512-pure K1600x8-AVX512-pure">
         <config>XKCP_has_x86_64_CPU_detection</config>
         <c>lib/low/x86-64-dispatch/x86-64-dispatch.c</c>
@@ -290,7 +294,7 @@ The fragments below allow to select the desired implementation of the permutatio
         <h>lib/common/PlSnP-common.h</h>
     </fragment>
 
-    <fragment name="K1600x2-SIMD128-pure" inherits="optimized K1600x2">
+    <fragment name="K1600x2-SIMD128-pure" inherits="optimized K1600x2 x86-64-SIMD-types">
         <h>lib/low/KeccakP-1600-times2/SIMD128/KeccakP-1600-times2-SIMD128.h</h>
         <inc>lib/low/KeccakP-1600/common/KeccakP-1600-unrolling.macros</inc>
     </fragment>
@@ -332,7 +336,7 @@ The fragments below allow to select the desired implementation of the permutatio
         <config>KeccakP1600times2_SSSE3_fullUnrolling</config>
     </fragment>
 
-    <fragment name="K1600x2-AVX512-pure" inherits="optimized K1600x2">
+    <fragment name="K1600x2-AVX512-pure" inherits="optimized K1600x2 x86-64-SIMD-types">
         <c gcc="-mavx512f -mavx512vl">lib/low/KeccakP-1600-times2/AVX512/KeccakP-1600-times2-AVX512.c</c>
         <h>lib/low/KeccakP-1600-times2/AVX512/KeccakP-1600-times2-AVX512.h</h>
     </fragment>
@@ -370,7 +374,7 @@ The fragments below allow to select the desired implementation of the permutatio
         <h>lib/common/PlSnP-common.h</h>
     </fragment>
 
-    <fragment name="K1600x4-AVX2-pure" inherits="optimized K1600x4">
+    <fragment name="K1600x4-AVX2-pure" inherits="optimized K1600x4 x86-64-SIMD-types">
         <c gcc="-mavx2">lib/low/KeccakP-1600-times4/AVX2/KeccakP-1600-times4-AVX2.c</c>
         <h>lib/low/KeccakP-1600-times4/AVX2/KeccakP-1600-times4-AVX2.h</h>
         <inc>lib/low/KeccakP-1600/common/KeccakP-1600-unrolling.macros</inc>
@@ -395,7 +399,7 @@ The fragments below allow to select the desired implementation of the permutatio
         <config>KeccakP1600times4_AVX2_fullUnrolling</config>
     </fragment>
 
-    <fragment name="K1600x4-AVX512-pure" inherits="optimized K1600x4">
+    <fragment name="K1600x4-AVX512-pure" inherits="optimized K1600x4 x86-64-SIMD-types">
         <c gcc="-mavx512f -mavx512vl">lib/low/KeccakP-1600-times4/AVX512/KeccakP-1600-times4-AVX512.c</c>
         <h>lib/low/KeccakP-1600-times4/AVX512/KeccakP-1600-times4-AVX512.h</h>
     </fragment>
@@ -426,7 +430,7 @@ The fragments below allow to select the desired implementation of the permutatio
         <h>lib/common/PlSnP-common.h</h>
     </fragment>
 
-    <fragment name="K1600x8-AVX512-pure" inherits="optimized K1600x8">
+    <fragment name="K1600x8-AVX512-pure" inherits="optimized K1600x8 x86-64-SIMD-types">
         <c gcc="-mavx512f -mavx512vl">lib/low/KeccakP-1600-times8/AVX512/KeccakP-1600-times8-AVX512.c</c>
         <h>lib/low/KeccakP-1600-times8/AVX512/KeccakP-1600-times8-AVX512.h</h>
     </fragment>
@@ -543,7 +547,7 @@ The fragments below allow to select the desired implementation of the permutatio
         <h>lib/common/PlSnP-common.h</h>
     </fragment>
 
-    <fragment name="Xoodoox4-SSSE3-pure" inherits="common optimized Xoodoox4">
+    <fragment name="Xoodoox4-SSSE3-pure" inherits="common optimized Xoodoox4 x86-64-SIMD-types">
         <c gcc="-mssse3">lib/low/Xoodoo-times4/SSSE3/Xoodoo-times4-SSSE3.c</c>
         <h>lib/low/Xoodoo-times4/SSSE3/Xoodoo-times4-SSSE3.h</h>
     </fragment>
@@ -552,7 +556,7 @@ The fragments below allow to select the desired implementation of the permutatio
         <h>lib/low/Xoodoo-times4/SSSE3/SnP/Xoodoo-times4-SnP.h</h>
     </fragment>
 
-    <fragment name="Xoodoox4-AVX512-pure" inherits="common optimized Xoodoox4">
+    <fragment name="Xoodoox4-AVX512-pure" inherits="common optimized Xoodoox4 x86-64-SIMD-types">
         <c gcc="-mavx512f -mavx512vl">lib/low/Xoodoo-times4/AVX512/Xoodoo-times4-AVX512.c</c>
         <h>lib/low/Xoodoo-times4/AVX512/Xoodoo-times4-AVX512.h</h>
     </fragment>
@@ -575,7 +579,7 @@ The fragments below allow to select the desired implementation of the permutatio
         <h>lib/common/PlSnP-common.h</h>
     </fragment>
 
-    <fragment name="Xoodoox8-AVX2-pure" inherits="common optimized Xoodoox8">
+    <fragment name="Xoodoox8-AVX2-pure" inherits="common optimized Xoodoox8 x86-64-SIMD-types">
         <c gcc="-mavx2">lib/low/Xoodoo-times8/AVX2/Xoodoo-times8-AVX2.c</c>
         <h>lib/low/Xoodoo-times8/AVX2/Xoodoo-times8-AVX2.h</h>
     </fragment>
@@ -584,7 +588,7 @@ The fragments below allow to select the desired implementation of the permutatio
         <h>lib/low/Xoodoo-times8/AVX2/SnP/Xoodoo-times8-SnP.h</h>
     </fragment>
 
-    <fragment name="Xoodoox8-AVX512-pure" inherits="common optimized Xoodoox8">
+    <fragment name="Xoodoox8-AVX512-pure" inherits="common optimized Xoodoox8 x86-64-SIMD-types">
         <c gcc="-mavx512f -mavx512vl">lib/low/Xoodoo-times8/AVX512/Xoodoo-times8-AVX512.c</c>
         <h>lib/low/Xoodoo-times8/AVX512/Xoodoo-times8-AVX512.h</h>
     </fragment>
@@ -600,7 +604,7 @@ The fragments below allow to select the desired implementation of the permutatio
         <h>lib/common/PlSnP-common.h</h>
     </fragment>
 
-    <fragment name="Xoodoox16-AVX512-pure" inherits="common optimized Xoodoox16">
+    <fragment name="Xoodoox16-AVX512-pure" inherits="common optimized Xoodoox16 x86-64-SIMD-types">
         <c gcc="-mavx512f -mavx512vl">lib/low/Xoodoo-times16/AVX512/Xoodoo-times16-AVX512.c</c>
         <h>lib/low/Xoodoo-times16/AVX512/Xoodoo-times16-AVX512.h</h>
     </fragment>

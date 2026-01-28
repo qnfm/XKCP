@@ -19,11 +19,9 @@ Please refer to PlSnP-documentation.h for more details.
 #define _KeccakP_1600_times4_AVX2_h_
 
 #include <stdint.h>
-#include <immintrin.h>
 #include "config.h"
 #include "PlSnP-common.h"
-
-typedef __m256i V256;
+#include "SIMD-types.h"
 
 typedef struct {
     V256 A[25];

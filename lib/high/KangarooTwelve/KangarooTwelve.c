@@ -147,10 +147,10 @@ int KangarooTwelve_Update(KangarooTwelve_Instance *ktInstance, const unsigned ch
 {
     unsigned int capacity = ktInstance->securityLevel*2;
     unsigned int capacityInBytes = capacity/8;
-    unsigned int capacityInLanes = capacity/64;
+    unsigned int capacityInLanes __attribute__((unused)) = capacity/64;
     unsigned int rate = 1600 - capacity;
-    unsigned int rateInBytes = rate/8;
-    unsigned int rateInLanes = rate/64;
+    unsigned int rateInBytes __attribute__((unused)) = rate/8;
+    unsigned int rateInLanes __attribute__((unused)) = rate/64;
 
     if (ktInstance->phase != ABSORBING)
         return 1;

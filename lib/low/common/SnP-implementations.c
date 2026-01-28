@@ -44,7 +44,7 @@ http://creativecommons.org/publicdomain/zero/1.0/
 void XKCP_PrintImplementations()
 {
     int SnP_feature_mask = ~0;
-    int PlSnP_feature_mask = ~0;
+    int PlSnP_feature_mask __attribute__((unused)) = ~0;
 
     #ifdef XKCP_has_KeccakP1600
     printf("Keccak-p[1600]\303\2271: %s\n", KeccakP1600_GetImplementation());

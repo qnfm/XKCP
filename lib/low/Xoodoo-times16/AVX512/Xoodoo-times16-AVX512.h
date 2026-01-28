@@ -18,11 +18,9 @@ http://creativecommons.org/publicdomain/zero/1.0/
 #define _Xoodoo_times16_AVX512_h_
 
 #include <stdint.h>
-#include <immintrin.h>
 #include "align.h"
 #include "PlSnP-common.h"
-
-typedef __m512i V512;
+#include "SIMD-types.h"
 
 typedef struct {
     V512 A[12];

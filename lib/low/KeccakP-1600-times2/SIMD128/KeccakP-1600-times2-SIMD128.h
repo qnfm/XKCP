@@ -19,11 +19,9 @@ Please refer to PlSnP-documentation.h for more details.
 #define _KeccakP_1600_times2_SIMD128_h_
 
 #include <stdint.h>
-#include <emmintrin.h>
 #include "config.h"
 #include "PlSnP-common.h"
-
-typedef __m128i V128;
+#include "SIMD-types.h"
 
 typedef struct {
     V128 A[25];

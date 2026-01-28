@@ -29,9 +29,6 @@ http://creativecommons.org/publicdomain/zero/1.0/
 #error Expecting a little-endian platform
 #endif
 
-typedef __m128i V128;
-typedef __m256i V256;
-
 #define SnP_laneLengthInBytes    4
 #define laneIndex(instanceIndex, lanePosition) ((lanePosition)*8 + instanceIndex)
 
@@ -652,7 +649,6 @@ size_t Xooffftimes8_AVX2_CompressFastLoop(unsigned char *k, unsigned char *x, co
     x23 = _mm256_setzero_si256();
 
     #define        rCGKDHLEI    r5926a37b
-    #define        aCGKDHLEI    ((uint32_t*)&rCGKDHLEI)
     do {
         /*    Note that a10-a12 and a11-a13 are swapped */
         a00 = r04815926;
@@ -667,13 +663,13 @@ size_t Xooffftimes8_AVX2_CompressFastLoop(unsigned char *k, unsigned char *x, co
         a03 = _mm256_blend_epi32(SHUFFLE_LANES_RIGHT(a02, 3), SHUFFLE_LANES_RIGHT(rCGKDHLEI, 5), 0xF8);
 
         a13 = INSERT_LANE(SHUFFLE_LANES_RIGHT(a01, 1), EXTRACT_LANE(a02, 5), 7);       /* B */
-        a10 = INSERT_LANE(SHUFFLE_LANES_RIGHT(a02, 1), aCGKDHLEI[2], 7); /* K */
-        a11 = INSERT_LANE(SHUFFLE_LANES_RIGHT(a03, 1), aCGKDHLEI[5], 7); /* L */
+        a10 = INSERT_LANE(SHUFFLE_LANES_RIGHT(a02, 1), EXTRACT_LANE(rCGKDHLEI, 2), 7); /* K */
+        a11 = INSERT_LANE(SHUFFLE_LANES_RIGHT(a03, 1), EXTRACT_LANE(rCGKDHLEI, 5), 7); /* L */
 
         a20 = INSERT_LANE(SHUFFLE_LANES_RIGHT(a12, 1), EXTRACT_LANE(a01, 6), 7);       /* 815926A+3 */
-        a21 = INSERT_LANE(SHUFFLE_LANES_RIGHT(a13, 1), aCGKDHLEI[0], 7); /* C */
-        a22 = INSERT_LANE(SHUFFLE_LANES_RIGHT(a10, 1), aCGKDHLEI[3], 7); /* D */
-        a23 = INSERT_LANE(SHUFFLE_LANES_RIGHT(a11, 1), aCGKDHLEI[6], 7); /* E */
+        a21 = INSERT_LANE(SHUFFLE_LANES_RIGHT(a13, 1), EXTRACT_LANE(rCGKDHLEI, 0), 7); /* C */
+        a22 = INSERT_LANE(SHUFFLE_LANES_RIGHT(a10, 1), EXTRACT_LANE(rCGKDHLEI, 3), 7); /* D */
+        a23 = INSERT_LANE(SHUFFLE_LANES_RIGHT(a11, 1), EXTRACT_LANE(rCGKDHLEI, 6), 7); /* E */
         r04815926 = a22;
         Dump("Roll-c", a);
 
@@ -803,7 +799,6 @@ size_t Xooffftimes8_AVX2_ExpandFastLoop(unsigned char *yAccu, const unsigned cha
     initialLength = length;
 
     #define        rCGKDHLEI    r5926a37b
-    #define        aCGKDHLEI    ((uint32_t*)&rCGKDHLEI)
     do {
         a00 = r04815926;
         a01 = _mm256_blend_epi32(SHUFFLE_LANES_RIGHT(r04815926, 3), SHUFFLE_LANES_RIGHT(r5926a37b, 7), 0xE0); /* 15926+A37 */
@@ -820,12 +815,12 @@ size_t Xooffftimes8_AVX2_ExpandFastLoop(unsigned char *yAccu, const unsigned cha
         a03 = _mm256_blend_epi32(SHUFFLE_LANES_RIGHT(a02, 3), SHUFFLE_LANES_RIGHT(rCGKDHLEI, 5), 0xF8);
 
         a13 = INSERT_LANE(SHUFFLE_LANES_RIGHT(a01, 1), EXTRACT_LANE(a02, 5), 7);       /* B */
-        a10 = INSERT_LANE(SHUFFLE_LANES_RIGHT(a02, 1), aCGKDHLEI[2], 7); /* K */
-        a11 = INSERT_LANE(SHUFFLE_LANES_RIGHT(a03, 1), aCGKDHLEI[5], 7); /* L */
+        a10 = INSERT_LANE(SHUFFLE_LANES_RIGHT(a02, 1), EXTRACT_LANE(rCGKDHLEI, 2), 7); /* K */
+        a11 = INSERT_LANE(SHUFFLE_LANES_RIGHT(a03, 1), EXTRACT_LANE(rCGKDHLEI, 5), 7); /* L */
 
-        a21 = INSERT_LANE(SHUFFLE_LANES_RIGHT(a13, 1), aCGKDHLEI[0], 7); /* C */
-        a22 = INSERT_LANE(SHUFFLE_LANES_RIGHT(a10, 1), aCGKDHLEI[3], 7); /* D */
-        a23 = INSERT_LANE(SHUFFLE_LANES_RIGHT(a11, 1), aCGKDHLEI[6], 7); /* E */
+        a21 = INSERT_LANE(SHUFFLE_LANES_RIGHT(a13, 1), EXTRACT_LANE(rCGKDHLEI, 0), 7); /* C */
+        a22 = INSERT_LANE(SHUFFLE_LANES_RIGHT(a10, 1), EXTRACT_LANE(rCGKDHLEI, 3), 7); /* D */
+        a23 = INSERT_LANE(SHUFFLE_LANES_RIGHT(a11, 1), EXTRACT_LANE(rCGKDHLEI, 6), 7); /* E */
         r04815926 = a22;
         Dump("Roll-e", a);
 

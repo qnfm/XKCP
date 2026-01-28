@@ -19,12 +19,10 @@ Please refer to PlSnP-documentation.h for more details.
 #define _KeccakP_1600_times2_AVX512_h_
 
 #include <stdint.h>
-#include <emmintrin.h>
 #include "align.h"
 #include "config.h"
 #include "PlSnP-common.h"
-
-typedef __m128i V128;
+#include "SIMD-types.h"
 
 typedef struct {
     ALIGN(64) V128 A[25];

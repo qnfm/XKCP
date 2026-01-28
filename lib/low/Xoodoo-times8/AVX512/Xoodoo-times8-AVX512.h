@@ -18,11 +18,9 @@ http://creativecommons.org/publicdomain/zero/1.0/
 #define _Xoodoo_times8_AVX512_h_
 
 #include <stdint.h>
-#include <immintrin.h>
 #include "align.h"
 #include "PlSnP-common.h"
-
-typedef __m256i V256;
+#include "SIMD-types.h"
 
 typedef struct {
     ALIGN(64) V256 A[12];
