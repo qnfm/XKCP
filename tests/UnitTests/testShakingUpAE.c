@@ -131,7 +131,7 @@ static void testDeckBO( int turbo, uint32_t c )
                 rv = SHAKE_BO_Unwrap( &dbou, P2, A, Alen, C, Plen + taglen );
             }
             assert(rv == 0);
-            memcmp( P, P2, Plen );
+            rv = memcmp( P, P2, Plen );
             assert(rv == 0);
         }
     }
