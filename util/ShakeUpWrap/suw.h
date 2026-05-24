@@ -25,18 +25,20 @@ http://creativecommons.org/publicdomain/zero/1.0/
 #define CHUNK_SIZE (64ULL * 1024ULL * 1024ULL)                /* 64MB chunks */
 
 typedef enum {
-    FILE_READ_SUCCESS = 0,
-    FILE_READ_ERROR_NULL_POINTER = -1,
-    FILE_READ_ERROR_INVALID_PATH = -2,
-    FILE_READ_ERROR_FILE_NOT_FOUND = -3,
-    FILE_READ_ERROR_FILE_TOO_SMALL = -4,
-    FILE_READ_ERROR_FILE_TOO_LARGE = -5,
-    FILE_READ_ERROR_MEMORY_ALLOCATION = -6,
-    FILE_READ_ERROR_READ_FAILED = -7,
-    FILE_READ_ERROR_SIZE_OVERFLOW = -8
-} file_read_result_t;
+    ENTROPY_READ_FAILED,
+    FILE_READ_SUCCESS,
+    FILE_READ_ERROR_NULL_POINTER,
+    FILE_READ_ERROR_INVALID_PATH,
+    FILE_READ_ERROR_FILE_NOT_FOUND,
+    FILE_READ_ERROR_FILE_TOO_SMALL,
+    FILE_READ_ERROR_FILE_TOO_LARGE,
+    FILE_READ_ERROR_MEMORY_ALLOCATION,
+    FILE_ERROR_READ_FAILED,
+    FILE_ERROR_WRITE_FAILED,
+    FILE_ERROR_SIZE_OVERFLOW
+} file_result_t;
 
-const char* get_error_message(file_read_result_t error_code);
+const char* get_error_message(file_result_t error_code);
 
 int encrypt(const char *path);
 int decrypt(const char *path);

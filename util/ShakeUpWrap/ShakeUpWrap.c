@@ -3,11 +3,11 @@
 #include <stdio.h>
 #include <string.h>
 
-// make clean && make AVX512/ShakeUpWrap -j$(nproc)
+// make clean && make x86-64/ShakeUpWrap -j$(nproc)
 
 int main(int argc, char* argv[]){
     bool enc = false;
-    file_read_result_t result;
+    file_result_t result;
     char *filepath;
     for(int i = 1; i < argc; i++){
        if(strcmp("--encrypt", argv[i]) == 0 || strcmp("-e", argv[i]) == 0){
