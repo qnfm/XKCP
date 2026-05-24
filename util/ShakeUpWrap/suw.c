@@ -23,7 +23,7 @@ http://creativecommons.org/publicdomain/zero/1.0/
 #include <stdio.h>
 #include <string.h>
 
-const char* get_error_message(file_read_result_t error_code) {
+const char* get_error_message(file_result_t error_code) {
     switch (error_code) {
         case FILE_READ_SUCCESS:
             return "Success";
@@ -39,9 +39,9 @@ const char* get_error_message(file_read_result_t error_code) {
             return "File size exceeds 999GB limit";
         case FILE_READ_ERROR_MEMORY_ALLOCATION:
             return "Memory allocation failed";
-        case FILE_READ_ERROR_READ_FAILED:
+        case FILE_ERROR_READ_FAILED:
             return "File read operation failed";
-        case FILE_READ_ERROR_SIZE_OVERFLOW:
+        case FILE_ERROR_SIZE_OVERFLOW:
             return "File size causes arithmetic overflow";
         default:
             return "Unknown error";
@@ -53,8 +53,10 @@ int encrypt(const char *path){
     unsigned int    rho     = (1600 - c - 64) /8;
     unsigned int    taglen  = c / 8;
     uint8_t         k[64] = {};
+    file_result_t err = FILE_READ_SUCCESS;
     if(getentropy(k, 64) != 0){
-        printf("Fail to get entropy\n");
+        perror("Fail to get entropy\n");
+        return ENTROPY_READ_FAILED;
     }
 
     const char * name = basename(path);
@@ -63,7 +65,7 @@ int encrypt(const char *path){
     strcat(Kpath, ".key");
     FILE *kf= fopen(Kpath, "ab");
     if (kf) {
-        if(fwrite(k, 1, 64, kf) != 64) return FILE_READ_ERROR_READ_FAILED;
+        if(fwrite(k, 1, 64, kf) != 64) return FILE_ERROR_WRITE_FAILED;
         fclose(kf);
     }
 
@@ -97,6 +99,7 @@ int encrypt(const char *path){
         size_t bytes_written = fwrite(C, 1, bytes_read + taglen, output_file);
         if (bytes_written != bytes_read + taglen) {
             perror("Error writing to output file");
+            err = FILE_ERROR_WRITE_FAILED;
             break;
         }
 
@@ -111,7 +114,7 @@ int encrypt(const char *path){
     fclose(input_file);
     fclose(output_file);
 
-    return FILE_READ_SUCCESS;
+    return err;
 }
 
 int decrypt(const char *path){
@@ -119,6 +122,7 @@ int decrypt(const char *path){
     unsigned int    rho     = (1600 - c - 64) /8;
     unsigned int    taglen  = c / 8;
     uint8_t         k[64] = {};
+    file_result_t err = FILE_READ_SUCCESS;
 
     FILE *input_file = fopen(path, "rb");
     if (!input_file) {
@@ -139,7 +143,7 @@ int decrypt(const char *path){
         if(fread(k, 1, 64, kf) != 64){
             fclose(input_file);
             fclose(kf);
-            return FILE_READ_ERROR_READ_FAILED;
+            return FILE_ERROR_READ_FAILED;
         }
         fclose(kf);
     }
@@ -168,6 +172,7 @@ int decrypt(const char *path){
         size_t bytes_written = fwrite(P, 1, bytes_read - taglen, output_file);
         if (bytes_written != bytes_read - taglen) {
             perror("Error writing to output file");
+            err = FILE_ERROR_WRITE_FAILED;
             break;
         }
 
@@ -183,6 +188,6 @@ int decrypt(const char *path){
     fclose(input_file);
     fclose(output_file);
 
-    return FILE_READ_SUCCESS;
+    return err;
 }
 #endif /* XKCP_has_ShakingUpAE */
