@@ -19,11 +19,9 @@ Please refer to PlSnP-documentation.h for more details.
 #define _KeccakP_1600_times8_AVX512_h_
 
 #include <stdint.h>
-#include <immintrin.h>
 #include "config.h"
 #include "PlSnP-common.h"
-
-typedef __m512i  V512;
+#include "SIMD-types.h"
 
 typedef struct {
     V512 A[25];

@@ -15,11 +15,11 @@ http://creativecommons.org/publicdomain/zero/1.0/
 */
 
 #define declareABCDE \
-    uint64_t Aba, Abe, Abi, Abo, Abu; \
-    uint64_t Aga, Age, Agi, Ago, Agu; \
-    uint64_t Aka, Ake, Aki, Ako, Aku; \
-    uint64_t Ama, Ame, Ami, Amo, Amu; \
-    uint64_t Asa, Ase, Asi, Aso, Asu; \
+    uint64_t Aba = 0, Abe = 0, Abi = 0, Abo = 0, Abu = 0; \
+    uint64_t Aga = 0, Age = 0, Agi = 0, Ago = 0, Agu = 0; \
+    uint64_t Aka = 0, Ake = 0, Aki = 0, Ako = 0, Aku = 0; \
+    uint64_t Ama = 0, Ame = 0, Ami = 0, Amo = 0, Amu = 0; \
+    uint64_t Asa = 0, Ase = 0, Asi = 0, Aso = 0, Asu = 0; \
     uint64_t Bba, Bbe, Bbi, Bbo, Bbu; \
     uint64_t Bga, Bge, Bgi, Bgo, Bgu; \
     uint64_t Bka, Bke, Bki, Bko, Bku; \

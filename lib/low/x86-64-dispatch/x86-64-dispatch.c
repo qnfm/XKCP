@@ -24,7 +24,7 @@ int XKCP_AVX512_requested_disabled = 0;
 int XKCP_enableSSSE3 = 0;
 int XKCP_enableAVX2 = 0;
 int XKCP_enableAVX512 = 0;
-void XKCP_SetProcessorCapabilities();
+void XKCP_SetProcessorCapabilities(void);
 
 #ifdef XKCP_has_KeccakP1600
 
@@ -1043,17 +1043,17 @@ void Xoofff_AddIs(unsigned char *output, const unsigned char *input, size_t bitL
 size_t Xoofff_CompressFastLoop(unsigned char *kRoll, unsigned char *xAccu, const unsigned char *input, size_t length)
 {
     if (XKCP_enableAVX512)
-        Xoofff_AVX512_CompressFastLoop(kRoll, xAccu, input, length);
-    else
-        assert(0);
+        return Xoofff_AVX512_CompressFastLoop(kRoll, xAccu, input, length);
+    assert(0);
+    return 0;
 }
 
 size_t Xoofff_ExpandFastLoop(unsigned char *yAccu, const unsigned char *kRoll, unsigned char *output, size_t length)
 {
     if (XKCP_enableAVX512)
-        Xoofff_AVX512_ExpandFastLoop(yAccu, kRoll, output, length);
-    else
-        assert(0);
+        return Xoofff_AVX512_ExpandFastLoop(yAccu, kRoll, output, length);
+    assert(0);
+    return 0;
 }
 
 size_t Xoodyak_AbsorbKeyedFullBlocks(Xoodoo_state *state, const uint8_t *X, size_t XLen)

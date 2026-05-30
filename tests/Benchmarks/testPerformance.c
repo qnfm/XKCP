@@ -619,9 +619,10 @@ uint32_t testKravatteNextLen( uint32_t len )
     else if (len < 16*Kravatte_rate) {
         len += Kravatte_rate;
     }
-    else
+    else {
         len <<= 1;
-	return len;
+    }
+    return len;
 }
 
 uint32_t testKravatteAdaptLen( uint32_t len )
@@ -809,9 +810,10 @@ uint32_t testODNextLen( uint32_t len, uint32_t rate )
         if (len > rate)
             len = rate;
     }
-    else
+    else {
         len <<= 1;
-	return len;
+    }
+    return len;
 }
 
 cycles_t measureSHAKE_Wrap_Init(cycles_t dtMin, int turbo, uint32_t c )
@@ -841,7 +843,6 @@ cycles_t measureSHAKE_Wrap_Wrap(cycles_t dtMin, int turbo, uint32_t c, unsigned 
     ALIGN_DEFAULT unsigned char key[32];
     ALIGN_DEFAULT unsigned char nonce[16];
     ALIGN_DEFAULT unsigned char AD[16];
-    ALIGN_DEFAULT unsigned char tag[2*32];
     KeccakWidth1600_DWrapInstance od;
     measureTimingDeclare
 
@@ -877,7 +878,6 @@ cycles_t measureSHAKE_Wrap_MAC(cycles_t dtMin, int turbo, uint32_t c, unsigned i
     ALIGN_DEFAULT unsigned char key[32];
     ALIGN_DEFAULT unsigned char nonce[16];
     unsigned char* AD = bigBuffer1;
-    ALIGN_DEFAULT unsigned char tag[2*32];
     KeccakWidth1600_DWrapInstance od;
     measureTimingDeclare
 
@@ -915,25 +915,24 @@ void testSHAKE_WrapPerformanceOne( int turbo )
     for ( unsigned int c = 256; c <= 512; c <<= 1 )
     {
         unsigned int    rate    = (1600 - c - 64)/8;
-        unsigned int    taglen  = c;
 
         time = measureSHAKE_Wrap_Init( calibration, turbo, c );
         printf("*** ");
         if (turbo) printf("Turbo");
         printf("SHAKE%u-Wrap ***\n\317\201=%u bytes\n", c/2, rate);
-        printf("\n.initialize()   %9u %s\n", time, getTimerUnit());
+        printf("\n.initialize()   %9" PRId64 " %s\n", time, getTimerUnit());
 
         printf("\n.wrap(only plaintext input, no AD)\n");
         for(len = 1; len <= 128*rate; len = testODNextLen(len, rate)) {
             time = measureSHAKE_Wrap_Wrap(calibration, turbo, c, len );
-            printf("%8d bytes: %9u %s, %6.3f %s/byte\n", len, time, getTimerUnit(), time*1.0/(len), getTimerUnit());
+            printf("%8d bytes: %9" PRId64 " %s, %6.3f %s/byte\n", len, time, getTimerUnit(), time*1.0/(len), getTimerUnit());
         }
         testOD_PerfSlope(measureSHAKE_Wrap_Wrap, turbo, rate, calibration);
 
         printf("\n.wrap(only AD input, no plaintext)\n");
         for(len = 1; len <= 128*rate; len = testODNextLen(len, rate)) {
             time = measureSHAKE_Wrap_MAC(calibration, turbo, c, len );
-            printf("%8d bytes: %9u %s, %6.3f %s/byte\n", len, time, getTimerUnit(), time*1.0/(len), getTimerUnit());
+            printf("%8d bytes: %9" PRId64 " %s, %6.3f %s/byte\n", len, time, getTimerUnit(), time*1.0/(len), getTimerUnit());
         }
         testOD_PerfSlope( measureSHAKE_Wrap_MAC, turbo, rate, calibration );
 
@@ -969,7 +968,6 @@ cycles_t measureSHAKE_BO_Wrap(cycles_t dtMin, int turbo, uint32_t c, unsigned in
     ALIGN_DEFAULT unsigned char key[32];
     ALIGN_DEFAULT unsigned char nonce[16];
     ALIGN_DEFAULT unsigned char AD[16];
-    ALIGN_DEFAULT unsigned char tag[2*32];
     KeccakWidth1600_DeckBOInstance od;
     measureTimingDeclare
 
@@ -1005,7 +1003,6 @@ cycles_t measureSHAKE_BO_MAC(cycles_t dtMin, int turbo, uint32_t c, unsigned int
     ALIGN_DEFAULT unsigned char key[32];
     ALIGN_DEFAULT unsigned char nonce[16];
     unsigned char* AD = bigBuffer1;
-    ALIGN_DEFAULT unsigned char tag[2*32];
     KeccakWidth1600_DeckBOInstance od;
     measureTimingDeclare
 
@@ -1043,25 +1040,24 @@ void testSHAKE_BOPerformanceOne( int turbo )
     for ( unsigned int c = 256; c <= 512; c <<= 1 )
     {
         unsigned int    rate    = (1600 - c - 64)/8;
-        unsigned int    taglen  = c;
 
         time = measureSHAKE_BO_Init( calibration, turbo, c );
         printf("*** ");
         if (turbo) printf("Turbo");
         printf("SHAKE%u-BO ***\n\317\201=%u bytes\n", c/2, rate);
-        printf("\n.initialize()   %9u %s\n", time, getTimerUnit());
+        printf("\n.initialize()   %9" PRId64 " %s\n", time, getTimerUnit());
 
         printf("\n.wrap(only plaintext input, no AD)\n");
         for(len = 1; len <= 128*rate; len = testODNextLen(len, rate)) {
             time = measureSHAKE_BO_Wrap(calibration, turbo, c, len );
-            printf("%8d bytes: %9u %s, %6.3f %s/byte\n", len, time, getTimerUnit(), time*1.0/(len), getTimerUnit());
+            printf("%8d bytes: %9" PRId64 " %s, %6.3f %s/byte\n", len, time, getTimerUnit(), time*1.0/(len), getTimerUnit());
         }
         testOD_PerfSlope(measureSHAKE_BO_Wrap, turbo, rate, calibration);
 
         printf("\n.wrap(only AD input, no plaintext)\n");
         for(len = 1; len <= 128*rate; len = testODNextLen(len, rate)) {
             time = measureSHAKE_BO_MAC(calibration, turbo, c, len );
-            printf("%8d bytes: %9u %s, %6.3f %s/byte\n", len, time, getTimerUnit(), time*1.0/(len), getTimerUnit());
+            printf("%8d bytes: %9" PRId64 " %s, %6.3f %s/byte\n", len, time, getTimerUnit(), time*1.0/(len), getTimerUnit());
         }
         testOD_PerfSlope( measureSHAKE_BO_MAC, turbo, rate, calibration );
 

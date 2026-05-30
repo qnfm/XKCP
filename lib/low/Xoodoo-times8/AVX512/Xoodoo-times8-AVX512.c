@@ -31,10 +31,6 @@ http://creativecommons.org/publicdomain/zero/1.0/
 
 #define VERBOSE         0
 
-typedef __m128i V128;
-typedef __m256i V256;
-typedef __m512i V512;
-
 #define SnP_laneLengthInBytes   4
 #define laneIndex(instanceIndex, lanePosition) ((lanePosition)*8 + instanceIndex)
 

@@ -120,7 +120,7 @@ ALIGN(16) static const uint8_t maskRhoEast2[16] = {
                         a2 = _mm_shuffle_epi8( a2, rhoEast2);                   \
                         Dump3("Rho-east")
 
-static const uint32_t    RC[MAXROUNDS] = {
+static const uint32_t    RC[MAXROUNDS] __attribute__((unused)) = {
     _rc12,
     _rc11,
     _rc10,

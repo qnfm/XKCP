@@ -37,8 +37,11 @@ http://creativecommons.org/publicdomain/zero/1.0/
 #define KRAVATTE_FLAG_LAST_PART     2 /* If set, indicates the last part of input/output */
 #define KRAVATTE_FLAG_SHORT         4 /* If set, indicates Short-Kravatte will be performed */
 
+#ifndef _Keccak_BitTypes_
+#define _Keccak_BitTypes_
 typedef unsigned char BitSequence;
 typedef size_t BitLength;
+#endif
 
 typedef enum
 {

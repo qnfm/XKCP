@@ -35,10 +35,6 @@ Please refer to LowLevel.build for the exact list of other files it must be comb
 #error Expecting a little-endian platform
 #endif
 
-typedef __m128i     V128;
-typedef __m256i     V256;
-typedef __m512i     V512;
-
 #define XOR(a,b)                    _mm_xor_si128(a,b)
 #define XOR3(a,b,c)                 _mm_ternarylogic_epi64(a,b,c,0x96)
 #define XOR5(a,b,c,d,e)             XOR3(XOR3(a,b,c),d,e)

@@ -32,8 +32,6 @@ Please refer to LowLevel.build for the exact list of other files it must be comb
 #error Expecting a little-endian platform
 #endif
 
-typedef __m128i V128;
-
 //#define UseGatherScatter
 
 #define laneIndex(instanceIndex, lanePosition) ((lanePosition)*4 + instanceIndex)
@@ -817,7 +815,7 @@ void KeccakP1600times4_AVX2_PermuteAll_12rounds(KeccakP1600times4_SIMD256_states
     V256 *statesAsLanes = states->A;
     declareABCDE
     #ifndef KeccakP1600times4_AVX2_fullUnrolling
-    unsigned int i;
+    unsigned int i __attribute__((unused));
     #endif
 
     copyFromState(A, statesAsLanes)
@@ -830,7 +828,7 @@ void KeccakP1600times4_AVX2_PermuteAll_6rounds(KeccakP1600times4_SIMD256_states 
     V256 *statesAsLanes = states->A;
     declareABCDE
     #ifndef KeccakP1600times4_AVX2_fullUnrolling
-    unsigned int i;
+    unsigned int i __attribute__((unused));
     #endif
 
     copyFromState(A, statesAsLanes)
@@ -843,7 +841,7 @@ void KeccakP1600times4_AVX2_PermuteAll_4rounds(KeccakP1600times4_SIMD256_states 
     V256 *statesAsLanes = states->A;
     declareABCDE
     #ifndef KeccakP1600times4_AVX2_fullUnrolling
-    unsigned int i;
+    unsigned int i __attribute__((unused));
     #endif
 
     copyFromState(A, statesAsLanes)
@@ -940,7 +938,7 @@ size_t KeccakF1600times4_AVX2_FastLoop_Absorb(KeccakP1600times4_SIMD256_states *
 #endif
     }
     else {
-        unsigned int i;
+        unsigned int i __attribute__((unused));
         const unsigned char *dataStart = data;
 
         while(dataByteLen >= (laneOffsetParallel*3 + laneCount)*8) {
@@ -995,7 +993,7 @@ size_t KeccakP1600times4_12rounds_AVX2_FastLoop_Absorb(KeccakP1600times4_SIMD256
         }
         return (const unsigned char *)curData0 - dataStart;
 #else
-        unsigned int i;
+        unsigned int i __attribute__((unused));
         const unsigned char *dataStart = data;
         const uint64_t *curData0 = (const uint64_t *)data;
         const uint64_t *curData1 = (const uint64_t *)(data+laneOffsetParallel*1*SnP_laneLengthInBytes);
@@ -1042,7 +1040,7 @@ size_t KeccakP1600times4_12rounds_AVX2_FastLoop_Absorb(KeccakP1600times4_SIMD256
 #endif
     }
     else if (laneCount == 17) {
-        unsigned int i;
+        unsigned int i __attribute__((unused));
         const unsigned char *dataStart = data;
         const uint64_t *curData0 = (const uint64_t *)data;
         const uint64_t *curData1 = (const uint64_t *)(data+laneOffsetParallel*1*SnP_laneLengthInBytes);
@@ -1084,7 +1082,7 @@ size_t KeccakP1600times4_12rounds_AVX2_FastLoop_Absorb(KeccakP1600times4_SIMD256
         return (const unsigned char *)curData0 - dataStart;
     }
     else {
-        unsigned int i;
+        unsigned int i __attribute__((unused));
         const unsigned char *dataStart = data;
 
         while(dataByteLen >= (laneOffsetParallel*3 + laneCount)*8) {
@@ -1185,7 +1183,7 @@ size_t KeccakP1600times4_AVX2_KravatteCompress(uint64_t *xAccu, uint64_t *kRoll,
     size_t    nBlocks = inputByteLen / (4 * 200);
     declareABCDE
     #if    !defined(KeccakP1600times4_AVX2_fullUnrolling)
-    unsigned int i;
+    unsigned int i __attribute__((unused));
     #endif
     V256    lanesL01, lanesL23, lanesH01, lanesH23;
     V256    x0x1x2x3, x1x2x3x4;
@@ -1271,7 +1269,7 @@ size_t KeccakP1600times4_AVX2_KravatteExpand(uint64_t *yAccu, const uint64_t *kR
     size_t    nBlocks = outputByteLen / (4 * 200);
     declareABCDE
     #if    !defined(KeccakP1600times4_AVX2_fullUnrolling)
-    unsigned int i;
+    unsigned int i __attribute__((unused));
     #endif
     V256    lanesL01, lanesL23, lanesH01, lanesH23;
     #if defined(UseGatherScatter)

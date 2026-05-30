@@ -36,9 +36,6 @@ Please refer to LowLevel.build for the exact list of other files it must be comb
 
 #define    VERBOSE        0
 
-typedef __m128i     V128;
-typedef __m256i     V256;
-
 #define XOR(a,b)                    _mm512_xor_si512(a,b)
 #define XOR3(a,b,c)                 _mm512_ternarylogic_epi64(a,b,c,0x96)
 #define XOR5(a,b,c,d,e)             XOR3(XOR3(a,b,c),d,e)
@@ -1123,8 +1120,8 @@ ALIGN(32) static const uint32_t     oGatherScatter[]= {0*25, 1*25, 2*25, 3*25, 4
 
 size_t KeccakP1600times8_AVX512_KravatteCompress(uint64_t *xAccu, uint64_t *kRoll, const unsigned char *input, size_t inputByteLen)
 {
-    #if    !defined(KeccakP1600times4_fullUnrolling)
-    unsigned int i;
+    #if    !defined(KeccakP1600times8_fullUnrolling)
+    unsigned int i __attribute__((unused));
     #endif
     uint64_t *in64 = (uint64_t *)input;
     size_t    nBlocks = inputByteLen / (8 * 200);
@@ -1330,8 +1327,8 @@ size_t KeccakP1600times8_AVX512_KravatteExpand(uint64_t *yAccu, const uint64_t *
     uint64_t *o64 = (uint64_t *)output;
     size_t    nBlocks = outputByteLen / (8 * 200);
     KeccakP_DeclareVars;
-    #if    !defined(KeccakP1600times4_fullUnrolling)
-    unsigned int i;
+    #if    !defined(KeccakP1600times8_fullUnrolling)
+    unsigned int i __attribute__((unused));
     #endif
     V512    x01234567, x23456789;
     V256    scatter = *(V256*)oGatherScatter;
