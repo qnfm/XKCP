@@ -70,6 +70,67 @@ For XKCP/lib/low/KeccakP-1600/AVX2/KeccakP-1600-AVX2.s and XKCP/lib/low/KeccakP-
     OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
+For the AArch64 (ARMv8-A) Keccak-f[1600] permutation cores
+XKCP/lib/low/KeccakP-1600/ARMv8A-SHA3/KeccakP-1600-x1-v84a-asm.s,
+XKCP/lib/low/KeccakP-1600-times2/ARMv8A/KeccakP-1600-times2-x2-v84a-asm.s,
+XKCP/lib/low/KeccakP-1600-times4/ARMv8A/KeccakP-1600-times4-x4-v8a-asm.s and
+XKCP/lib/low/KeccakP-1600-times4/ARMv8A/KeccakP-1600-times4-x4-v84a-asm.s
+(potentially used in libXKCP, UnitTests, Benchmarks and KeccakSum, depending on the target platform):
+
+    The Keccak-f[1600] permutation routines in these files are reproduced, with
+    only minor edits to the surrounding wrappers (include directives,
+    configuration guards and symbol-naming macros), from the mlkem-native
+    project (https://github.com/pq-code-package/mlkem-native), and originate in:
+
+        "Hybrid scalar/vector implementations of Keccak and SPHINCS+ on AArch64",
+        Hanno Becker and Matthias J. Kannwischer, https://eprint.iacr.org/2022/1243
+
+    They are made available under any one of the Apache-2.0, ISC or MIT licenses,
+    at the recipient's option (SPDX-License-Identifier: Apache-2.0 OR ISC OR MIT):
+
+    Copyright (c) The mlkem-native project authors
+    Copyright (c) 2021-2022 Arm Limited
+    Copyright (c) 2022 Matthias Kannwischer
+
+    The text of the Apache License, Version 2.0 is available at
+    http://www.apache.org/licenses/LICENSE-2.0 ; the ISC and MIT license texts
+    follow.
+
+    ISC License:
+
+    Permission to use, copy, modify, and/or distribute this software for any
+    purpose with or without fee is hereby granted, provided that the above
+    copyright notice and this permission notice appear in all copies.
+
+    THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+    WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+    MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+    ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+    WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+    ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+    OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+    MIT License:
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
+
+
 For XKCP/Standalone/CompactFIPS202/C/genKAT.c, XKCP/tests/UnitTests/genKAT.c and XKCP/tests/UnitTests/genKAT.h (used only in UnitTests):
 
     Copyright (c) 2008, Lawrence E. Bassham, National Institute of Standards and Technology (NIST),
