@@ -21,6 +21,7 @@ http://creativecommons.org/publicdomain/zero/1.0/
 
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <string.h>
 #include <unistd.h>
 #include <stdint.h>
@@ -233,6 +234,286 @@ static suw_result_t read_full_or_eof(FILE *input,
     *hit_eof = total < len;
 
     return SUW_OK;
+}
+
+#define SUW_ASYNC_READ_SLOTS 3U
+
+typedef struct {
+    uint8_t *buf;
+    size_t len;
+    int hit_eof;
+    int state; /* 0 = empty, 1 = ready, 2 = owned by consumer */
+    uint64_t seq;
+} suw_async_read_slot_t;
+
+typedef struct {
+    FILE *input;
+    size_t chunk_size;
+    suw_async_read_slot_t slots[SUW_ASYNC_READ_SLOTS];
+    uint64_t next_fill_seq;
+    uint64_t next_drain_seq;
+    int stop;
+    int done;
+    int started;
+    suw_result_t result;
+    pthread_t thread;
+    pthread_mutex_t mutex;
+    pthread_cond_t can_fill;
+    pthread_cond_t can_drain;
+} suw_async_reader_t;
+
+static int async_reader_has_empty_slot(const suw_async_reader_t *reader)
+{
+    size_t i;
+
+    for (i = 0; i < SUW_ASYNC_READ_SLOTS; i++) {
+        if (reader->slots[i].state == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static suw_async_read_slot_t *async_reader_find_empty_slot(suw_async_reader_t *reader)
+{
+    size_t i;
+
+    for (i = 0; i < SUW_ASYNC_READ_SLOTS; i++) {
+        if (reader->slots[i].state == 0) {
+            return &reader->slots[i];
+        }
+    }
+
+    return NULL;
+}
+
+static suw_async_read_slot_t *async_reader_find_ready_slot(suw_async_reader_t *reader)
+{
+    size_t i;
+
+    for (i = 0; i < SUW_ASYNC_READ_SLOTS; i++) {
+        if (reader->slots[i].state == 1 &&
+            reader->slots[i].seq == reader->next_drain_seq) {
+            return &reader->slots[i];
+        }
+    }
+
+    return NULL;
+}
+
+static void *async_reader_thread_main(void *arg)
+{
+    suw_async_reader_t *reader = (suw_async_reader_t *)arg;
+
+    while (1) {
+        suw_async_read_slot_t *slot;
+        size_t len = 0;
+        int hit_eof = 0;
+        suw_result_t result;
+
+        pthread_mutex_lock(&reader->mutex);
+        while (!reader->stop && !async_reader_has_empty_slot(reader)) {
+            pthread_cond_wait(&reader->can_fill, &reader->mutex);
+        }
+
+        if (reader->stop) {
+            pthread_mutex_unlock(&reader->mutex);
+            break;
+        }
+
+        slot = async_reader_find_empty_slot(reader);
+        if (slot == NULL) {
+            pthread_mutex_unlock(&reader->mutex);
+            continue;
+        }
+        slot->state = 2;
+        pthread_mutex_unlock(&reader->mutex);
+
+        result = read_full_or_eof(reader->input,
+                                  slot->buf,
+                                  reader->chunk_size,
+                                  &len,
+                                  &hit_eof);
+
+        pthread_mutex_lock(&reader->mutex);
+        if (reader->stop) {
+            slot->state = 0;
+            pthread_cond_signal(&reader->can_fill);
+            pthread_mutex_unlock(&reader->mutex);
+            break;
+        }
+
+        if (result != SUW_OK) {
+            reader->result = result;
+            reader->done = 1;
+            slot->state = 0;
+            pthread_cond_broadcast(&reader->can_drain);
+            pthread_mutex_unlock(&reader->mutex);
+            break;
+        }
+
+        slot->len = len;
+        slot->hit_eof = hit_eof;
+        slot->seq = reader->next_fill_seq++;
+        slot->state = 1;
+
+        if (hit_eof) {
+            reader->done = 1;
+        }
+
+        pthread_cond_broadcast(&reader->can_drain);
+        pthread_mutex_unlock(&reader->mutex);
+
+        if (hit_eof) {
+            break;
+        }
+    }
+
+    return NULL;
+}
+
+static suw_result_t async_reader_init(suw_async_reader_t *reader,
+                                      FILE *input,
+                                      size_t chunk_size)
+{
+    size_t i;
+    int mutex_ready = 0;
+    int can_fill_ready = 0;
+    int can_drain_ready = 0;
+
+    if (reader == NULL || input == NULL || chunk_size == 0) {
+        return SUW_ERR_INVALID_ARGUMENT;
+    }
+
+    memset(reader, 0, sizeof(*reader));
+    reader->input = input;
+    reader->chunk_size = chunk_size;
+    reader->result = SUW_OK;
+
+    for (i = 0; i < SUW_ASYNC_READ_SLOTS; i++) {
+        reader->slots[i].buf = malloc(chunk_size);
+        if (reader->slots[i].buf == NULL) {
+            goto fail;
+        }
+    }
+
+    if (pthread_mutex_init(&reader->mutex, NULL) != 0) {
+        goto fail;
+    }
+    mutex_ready = 1;
+
+    if (pthread_cond_init(&reader->can_fill, NULL) != 0) {
+        goto fail;
+    }
+    can_fill_ready = 1;
+
+    if (pthread_cond_init(&reader->can_drain, NULL) != 0) {
+        goto fail;
+    }
+    can_drain_ready = 1;
+
+    if (pthread_create(&reader->thread, NULL, async_reader_thread_main, reader) != 0) {
+        goto fail;
+    }
+    reader->started = 1;
+
+    return SUW_OK;
+
+fail:
+    if (can_drain_ready) {
+        pthread_cond_destroy(&reader->can_drain);
+    }
+    if (can_fill_ready) {
+        pthread_cond_destroy(&reader->can_fill);
+    }
+    if (mutex_ready) {
+        pthread_mutex_destroy(&reader->mutex);
+    }
+    for (i = 0; i < SUW_ASYNC_READ_SLOTS; i++) {
+        free(reader->slots[i].buf);
+        reader->slots[i].buf = NULL;
+    }
+
+    return SUW_ERR_MEMORY_ALLOCATION_FAILED;
+}
+
+static suw_result_t async_reader_next(suw_async_reader_t *reader,
+                                      suw_async_read_slot_t **slot)
+{
+    suw_async_read_slot_t *ready;
+
+    if (reader == NULL || slot == NULL) {
+        return SUW_ERR_INVALID_ARGUMENT;
+    }
+
+    *slot = NULL;
+
+    pthread_mutex_lock(&reader->mutex);
+    while ((ready = async_reader_find_ready_slot(reader)) == NULL &&
+           !reader->done) {
+        pthread_cond_wait(&reader->can_drain, &reader->mutex);
+    }
+
+    if (ready != NULL) {
+        ready->state = 2;
+        reader->next_drain_seq++;
+        *slot = ready;
+        pthread_mutex_unlock(&reader->mutex);
+        return SUW_OK;
+    }
+
+    if (reader->result != SUW_OK) {
+        suw_result_t result = reader->result;
+        pthread_mutex_unlock(&reader->mutex);
+        return result;
+    }
+
+    pthread_mutex_unlock(&reader->mutex);
+    return SUW_ERR_INTERNAL;
+}
+
+static void async_reader_release(suw_async_reader_t *reader,
+                                 suw_async_read_slot_t *slot)
+{
+    if (reader == NULL || slot == NULL) {
+        return;
+    }
+
+    pthread_mutex_lock(&reader->mutex);
+    slot->state = 0;
+    pthread_cond_signal(&reader->can_fill);
+    pthread_mutex_unlock(&reader->mutex);
+}
+
+static void async_reader_destroy(suw_async_reader_t *reader)
+{
+    size_t i;
+
+    if (reader == NULL) {
+        return;
+    }
+
+    pthread_mutex_lock(&reader->mutex);
+    reader->stop = 1;
+    pthread_cond_broadcast(&reader->can_fill);
+    pthread_cond_broadcast(&reader->can_drain);
+    pthread_mutex_unlock(&reader->mutex);
+
+    if (reader->started) {
+        pthread_join(reader->thread, NULL);
+        reader->started = 0;
+    }
+
+    pthread_cond_destroy(&reader->can_drain);
+    pthread_cond_destroy(&reader->can_fill);
+    pthread_mutex_destroy(&reader->mutex);
+
+    for (i = 0; i < SUW_ASYNC_READ_SLOTS; i++) {
+        secure_clear(reader->slots[i].buf, reader->chunk_size);
+        free(reader->slots[i].buf);
+        reader->slots[i].buf = NULL;
+    }
 }
 
 static suw_result_t check_key_does_not_exist(const char *key_path)
@@ -473,17 +754,24 @@ suw_result_t encrypt_stream(FILE *input, const char *output_path, const char *ke
         return result;
     }
 
-    uint8_t *P0 = malloc(SUW_CHUNK_SIZE);
-    uint8_t *P1 = malloc(SUW_CHUNK_SIZE);
+    suw_async_reader_t reader;
+    suw_async_read_slot_t *cur = NULL;
     uint8_t *C = malloc(SUW_CHUNK_SIZE + SUW_TAGLEN);
+    int reader_initialized = 0;
 
-    if (P0 == NULL || P1 == NULL || C == NULL) {
-        free(P0);
-        free(P1);
+    if (C == NULL) {
         free(C);
         abort_output(&output);
         return SUW_ERR_MEMORY_ALLOCATION_FAILED;
     }
+
+    result = async_reader_init(&reader, input, SUW_CHUNK_SIZE);
+    if (result != SUW_OK) {
+        free(C);
+        abort_output(&output);
+        return result;
+    }
+    reader_initialized = 1;
 
     result = create_and_write_key(key_path, key);
     if (result != SUW_OK) {
@@ -498,10 +786,12 @@ suw_result_t encrypt_stream(FILE *input, const char *output_path, const char *ke
     size_t cur_len = 0;
     int cur_eof = 0;
 
-    result = read_full_or_eof(input, P0, SUW_CHUNK_SIZE, &cur_len, &cur_eof);
+    result = async_reader_next(&reader, &cur);
     if (result != SUW_OK) {
         goto done;
     }
+    cur_len = cur->len;
+    cur_eof = cur->hit_eof;
 
     /*
      * Empty plaintext: emit exactly one empty final chunk.
@@ -517,21 +807,27 @@ suw_result_t encrypt_stream(FILE *input, const char *output_path, const char *ke
                         C,
                         aad,
                         sizeof(aad),
-                        P0,
+                        cur->buf,
                         0);
 
         result = write_all_file(output.fp, C, SUW_TAGLEN);
+        async_reader_release(&reader, cur);
+        cur = NULL;
         goto done;
     }
 
     while (1) {
+        suw_async_read_slot_t *next = NULL;
         size_t next_len = 0;
         int next_eof = 0;
 
-        result = read_full_or_eof(input, P1, SUW_CHUNK_SIZE, &next_len, &next_eof);
+        result = async_reader_next(&reader, &next);
         if (result != SUW_OK) {
             break;
         }
+
+        next_len = next->len;
+        next_eof = next->hit_eof;
 
         if (next_len == 0 && next_eof) {
             make_chunk_aad(aad, chunk_index, SUW_FINAL_TRUE);
@@ -540,10 +836,13 @@ suw_result_t encrypt_stream(FILE *input, const char *output_path, const char *ke
                             C,
                             aad,
                             sizeof(aad),
-                            P0,
+                            cur->buf,
                             cur_len);
 
             result = write_all_file(output.fp, C, cur_len + SUW_TAGLEN);
+            async_reader_release(&reader, cur);
+            cur = NULL;
+            async_reader_release(&reader, next);
             break;
         }
 
@@ -553,24 +852,22 @@ suw_result_t encrypt_stream(FILE *input, const char *output_path, const char *ke
                         C,
                         aad,
                         sizeof(aad),
-                        P0,
+                        cur->buf,
                         cur_len);
 
         result = write_all_file(output.fp, C, cur_len + SUW_TAGLEN);
+        async_reader_release(&reader, cur);
+        cur = NULL;
         if (result != SUW_OK) {
+            async_reader_release(&reader, next);
             break;
         }
 
         chunk_index++;
-
-        {
-            uint8_t *tmp = P0;
-            P0 = P1;
-            P1 = tmp;
-        }
-
+        cur = next;
         cur_len = next_len;
-        (void)next_eof;
+        cur_eof = next_eof;
+        (void)cur_eof;
     }
 
 done:
@@ -580,14 +877,17 @@ done:
         abort_output(&output);
     }
 
-    secure_clear(P0, SUW_CHUNK_SIZE);
-    secure_clear(P1, SUW_CHUNK_SIZE);
+    if (cur != NULL) {
+        async_reader_release(&reader, cur);
+        cur = NULL;
+    }
+    if (reader_initialized) {
+        async_reader_destroy(&reader);
+    }
     secure_clear(C, SUW_CHUNK_SIZE + SUW_TAGLEN);
     secure_clear(key, sizeof(key));
     secure_clear(aad, sizeof(aad));
 
-    free(P0);
-    free(P1);
     free(C);
 
     return result;
