@@ -21,6 +21,7 @@ http://creativecommons.org/publicdomain/zero/1.0/
 
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <string.h>
 #include <unistd.h>
 #include <stdint.h>
@@ -233,6 +234,140 @@ static suw_result_t read_full_or_eof(FILE *input,
     *hit_eof = total < len;
 
     return SUW_OK;
+}
+
+/*
+ * Parallel chunk processing.
+ *
+ * ShakingUpAE's DWrap is a stateful duplex: calling Wrap/Unwrap evolves the
+ * instance, so the original streaming format chains every chunk into a single
+ * sequence and is therefore strictly serial. This build instead treats each
+ * chunk as an independent message: every chunk is wrapped from a *clone* of the
+ * initial keyed instance, with the chunk index and final flag bound in the AAD.
+ * Independent chunks can then be encrypted/decrypted concurrently on a pool of
+ * worker threads. The AAD still binds ordering and finality, so truncation,
+ * reordering and tampering remain detectable exactly as before.
+ */
+
+typedef struct {
+    const KeccakWidth1600_DWrapInstance *base;
+    uint8_t       *in;        /* plaintext (encrypt) or ciphertext+tag (decrypt) */
+    size_t         in_len;
+    uint8_t       *out;       /* ciphertext+tag (encrypt) or plaintext (decrypt) */
+    size_t         out_len;
+    uint64_t       chunk_index;
+    uint8_t        final_flag;
+    int            is_decrypt;
+    int            auth_ok;    /* decrypt only: 1 if the tag verified */
+} suw_chunk_job_t;
+
+typedef struct {
+    suw_chunk_job_t *jobs;
+    size_t           start;
+    size_t           end;
+} suw_worker_arg_t;
+
+static void suw_process_job(suw_chunk_job_t *j)
+{
+    KeccakWidth1600_DWrapInstance local;
+    uint8_t aad[SUW_AAD_SIZE];
+
+    SHAKE_Wrap_Clone(&local, j->base);
+    make_chunk_aad(aad, j->chunk_index, j->final_flag);
+
+    if (j->is_decrypt) {
+        if (SHAKE_Wrap_Unwrap(&local, j->out, aad, sizeof(aad),
+                              j->in, j->in_len) == 0) {
+            j->auth_ok = 1;
+            j->out_len = j->in_len - SUW_TAGLEN;
+        } else {
+            j->auth_ok = 0;
+            j->out_len = 0;
+        }
+    } else {
+        SHAKE_Wrap_Wrap(&local, j->out, aad, sizeof(aad), j->in, j->in_len);
+        j->out_len = j->in_len + SUW_TAGLEN;
+    }
+}
+
+static void *suw_worker_main(void *arg)
+{
+    suw_worker_arg_t *w = (suw_worker_arg_t *)arg;
+    size_t i;
+
+    for (i = w->start; i < w->end; i++) {
+        suw_process_job(&w->jobs[i]);
+    }
+
+    return NULL;
+}
+
+static unsigned suw_num_threads(void)
+{
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+
+    if (n < 1) {
+        n = 1;
+    }
+    if (n > (long)SUW_MAX_THREADS) {
+        n = (long)SUW_MAX_THREADS;
+    }
+
+    return (unsigned)n;
+}
+
+/* Process jobs[0..njobs) across up to nthreads worker threads, then return. */
+static void suw_run_batch(suw_chunk_job_t *jobs, size_t njobs, unsigned nthreads)
+{
+    pthread_t        threads[SUW_MAX_THREADS];
+    suw_worker_arg_t args[SUW_MAX_THREADS];
+    int              created[SUW_MAX_THREADS];
+    size_t           per, rem, start;
+    unsigned         t;
+
+    if (njobs == 0) {
+        return;
+    }
+
+    if (nthreads < 1) {
+        nthreads = 1;
+    }
+    if ((size_t)nthreads > njobs) {
+        nthreads = (unsigned)njobs;
+    }
+
+    if (nthreads == 1) {
+        suw_worker_arg_t a = { jobs, 0, njobs };
+        suw_worker_main(&a);
+        return;
+    }
+
+    per = njobs / nthreads;
+    rem = njobs % nthreads;
+    start = 0;
+
+    for (t = 0; t < nthreads; t++) {
+        size_t count = per + (t < rem ? 1u : 0u);
+
+        args[t].jobs = jobs;
+        args[t].start = start;
+        args[t].end = start + count;
+        start += count;
+
+        if (pthread_create(&threads[t], NULL, suw_worker_main, &args[t]) == 0) {
+            created[t] = 1;
+        } else {
+            /* Fall back to running this slice on the calling thread. */
+            created[t] = 0;
+            suw_worker_main(&args[t]);
+        }
+    }
+
+    for (t = 0; t < nthreads; t++) {
+        if (created[t]) {
+            pthread_join(threads[t], NULL);
+        }
+    }
 }
 
 static suw_result_t check_key_does_not_exist(const char *key_path)
@@ -459,7 +594,6 @@ suw_result_t encrypt_stream(FILE *input, const char *output_path, const char *ke
 
     suw_result_t result = SUW_OK;
     uint8_t key[SUW_KEY_SIZE] = {0};
-    uint8_t aad[SUW_AAD_SIZE];
 
     suw_output_t output;
 
@@ -473,16 +607,35 @@ suw_result_t encrypt_stream(FILE *input, const char *output_path, const char *ke
         return result;
     }
 
-    uint8_t *P0 = malloc(SUW_CHUNK_SIZE);
-    uint8_t *P1 = malloc(SUW_CHUNK_SIZE);
-    uint8_t *C = malloc(SUW_CHUNK_SIZE + SUW_TAGLEN);
+    unsigned nthreads = suw_num_threads();
+    size_t   width = nthreads;            /* chunks processed per batch */
+    size_t   i;
 
-    if (P0 == NULL || P1 == NULL || C == NULL) {
-        free(P0);
-        free(P1);
-        free(C);
+    /* width + 1 input buffers (one extra for cross-batch read-ahead). */
+    uint8_t **inbuf = calloc(width + 1, sizeof(*inbuf));
+    uint8_t **outbuf = calloc(width, sizeof(*outbuf));
+    suw_chunk_job_t *jobs = calloc(width, sizeof(*jobs));
+    int alloc_ok = (inbuf != NULL && outbuf != NULL && jobs != NULL);
+
+    if (alloc_ok) {
+        for (i = 0; i < width + 1; i++) {
+            inbuf[i] = malloc(SUW_CHUNK_SIZE);
+            if (inbuf[i] == NULL) {
+                alloc_ok = 0;
+            }
+        }
+        for (i = 0; i < width; i++) {
+            outbuf[i] = malloc(SUW_CHUNK_SIZE + SUW_TAGLEN);
+            if (outbuf[i] == NULL) {
+                alloc_ok = 0;
+            }
+        }
+    }
+
+    if (!alloc_ok) {
+        result = SUW_ERR_MEMORY_ALLOCATION_FAILED;
         abort_output(&output);
-        return SUW_ERR_MEMORY_ALLOCATION_FAILED;
+        goto cleanup;
     }
 
     result = create_and_write_key(key_path, key);
@@ -494,83 +647,85 @@ suw_result_t encrypt_stream(FILE *input, const char *output_path, const char *ke
     SHAKE_Wrap_Initialize(&dww, key, sizeof(key), SUW_TAGLEN, SUW_RHO, SUW_CAPACITY);
 
     uint64_t chunk_index = 0;
+    size_t   cur_len = 0;
+    int      cur_eof = 0;
 
-    size_t cur_len = 0;
-    int cur_eof = 0;
-
-    result = read_full_or_eof(input, P0, SUW_CHUNK_SIZE, &cur_len, &cur_eof);
+    result = read_full_or_eof(input, inbuf[0], SUW_CHUNK_SIZE, &cur_len, &cur_eof);
     if (result != SUW_OK) {
         goto done;
     }
 
     /*
-     * Empty plaintext: emit exactly one empty final chunk.
-     *
-     * This is the only accepted empty-final-chunk encoding. For non-empty
-     * plaintext whose size is exactly a multiple of SUW_CHUNK_SIZE, the last
-     * full chunk is marked final.
+     * Empty plaintext: emit exactly one empty final chunk. This is the only
+     * accepted empty-final-chunk encoding.
      */
     if (cur_len == 0 && cur_eof) {
-        make_chunk_aad(aad, chunk_index, SUW_FINAL_TRUE);
+        jobs[0].base = &dww;
+        jobs[0].in = inbuf[0];
+        jobs[0].in_len = 0;
+        jobs[0].out = outbuf[0];
+        jobs[0].chunk_index = 0;
+        jobs[0].final_flag = SUW_FINAL_TRUE;
+        jobs[0].is_decrypt = 0;
 
-        SHAKE_Wrap_Wrap(&dww,
-                        C,
-                        aad,
-                        sizeof(aad),
-                        P0,
-                        0);
-
-        result = write_all_file(output.fp, C, SUW_TAGLEN);
+        suw_process_job(&jobs[0]);
+        result = write_all_file(output.fp, jobs[0].out, jobs[0].out_len);
         goto done;
     }
 
-    while (1) {
-        size_t next_len = 0;
-        int next_eof = 0;
+    int done_flag = 0;
+    while (!done_flag) {
+        size_t nb = 0;
 
-        result = read_full_or_eof(input, P1, SUW_CHUNK_SIZE, &next_len, &next_eof);
-        if (result != SUW_OK) {
-            break;
+        while (1) {
+            size_t next_len = 0;
+            int next_eof = 0;
+            uint8_t final_flag;
+
+            /* Read one chunk ahead to learn whether the current one is final. */
+            result = read_full_or_eof(input, inbuf[nb + 1], SUW_CHUNK_SIZE,
+                                      &next_len, &next_eof);
+            if (result != SUW_OK) {
+                goto done;
+            }
+
+            final_flag = (next_len == 0 && next_eof) ? SUW_FINAL_TRUE
+                                                     : SUW_FINAL_FALSE;
+
+            jobs[nb].base = &dww;
+            jobs[nb].in = inbuf[nb];
+            jobs[nb].in_len = cur_len;
+            jobs[nb].out = outbuf[nb];
+            jobs[nb].chunk_index = chunk_index++;
+            jobs[nb].final_flag = final_flag;
+            jobs[nb].is_decrypt = 0;
+            nb++;
+
+            if (final_flag == SUW_FINAL_TRUE) {
+                done_flag = 1;
+                break;
+            }
+
+            cur_len = next_len;       /* read-ahead chunk now sits in inbuf[nb] */
+            if (nb == width) {
+                break;                /* batch full; carry inbuf[width] below */
+            }
         }
 
-        if (next_len == 0 && next_eof) {
-            make_chunk_aad(aad, chunk_index, SUW_FINAL_TRUE);
+        suw_run_batch(jobs, nb, nthreads);
 
-            SHAKE_Wrap_Wrap(&dww,
-                            C,
-                            aad,
-                            sizeof(aad),
-                            P0,
-                            cur_len);
-
-            result = write_all_file(output.fp, C, cur_len + SUW_TAGLEN);
-            break;
+        for (i = 0; i < nb; i++) {
+            result = write_all_file(output.fp, jobs[i].out, jobs[i].out_len);
+            if (result != SUW_OK) {
+                goto done;
+            }
         }
 
-        make_chunk_aad(aad, chunk_index, SUW_FINAL_FALSE);
-
-        SHAKE_Wrap_Wrap(&dww,
-                        C,
-                        aad,
-                        sizeof(aad),
-                        P0,
-                        cur_len);
-
-        result = write_all_file(output.fp, C, cur_len + SUW_TAGLEN);
-        if (result != SUW_OK) {
-            break;
+        if (!done_flag) {
+            uint8_t *tmp = inbuf[0];
+            inbuf[0] = inbuf[width];
+            inbuf[width] = tmp;
         }
-
-        chunk_index++;
-
-        {
-            uint8_t *tmp = P0;
-            P0 = P1;
-            P1 = tmp;
-        }
-
-        cur_len = next_len;
-        (void)next_eof;
     }
 
 done:
@@ -580,15 +735,27 @@ done:
         abort_output(&output);
     }
 
-    secure_clear(P0, SUW_CHUNK_SIZE);
-    secure_clear(P1, SUW_CHUNK_SIZE);
-    secure_clear(C, SUW_CHUNK_SIZE + SUW_TAGLEN);
+cleanup:
+    if (inbuf != NULL) {
+        for (i = 0; i < width + 1; i++) {
+            if (inbuf[i] != NULL) {
+                secure_clear(inbuf[i], SUW_CHUNK_SIZE);
+                free(inbuf[i]);
+            }
+        }
+        free(inbuf);
+    }
+    if (outbuf != NULL) {
+        for (i = 0; i < width; i++) {
+            if (outbuf[i] != NULL) {
+                secure_clear(outbuf[i], SUW_CHUNK_SIZE + SUW_TAGLEN);
+                free(outbuf[i]);
+            }
+        }
+        free(outbuf);
+    }
+    free(jobs);
     secure_clear(key, sizeof(key));
-    secure_clear(aad, sizeof(aad));
-
-    free(P0);
-    free(P1);
-    free(C);
 
     return result;
 }
@@ -601,7 +768,6 @@ suw_result_t decrypt_stream(FILE *input, const char *output_path, const char *ke
 
     suw_result_t result = SUW_OK;
     uint8_t key[SUW_KEY_SIZE] = {0};
-    uint8_t aad[SUW_AAD_SIZE];
 
     suw_output_t output;
 
@@ -617,32 +783,45 @@ suw_result_t decrypt_stream(FILE *input, const char *output_path, const char *ke
         return result;
     }
 
-    uint8_t *C0 = malloc(SUW_CHUNK_SIZE + SUW_TAGLEN);
-    uint8_t *C1 = malloc(SUW_CHUNK_SIZE + SUW_TAGLEN);
-    uint8_t *P = malloc(SUW_CHUNK_SIZE);
+    unsigned nthreads = suw_num_threads();
+    size_t   width = nthreads;
+    size_t   i;
 
-    if (C0 == NULL || C1 == NULL || P == NULL) {
-        free(C0);
-        free(C1);
-        free(P);
+    uint8_t **inbuf = calloc(width + 1, sizeof(*inbuf));
+    uint8_t **outbuf = calloc(width, sizeof(*outbuf));
+    suw_chunk_job_t *jobs = calloc(width, sizeof(*jobs));
+    int alloc_ok = (inbuf != NULL && outbuf != NULL && jobs != NULL);
+
+    if (alloc_ok) {
+        for (i = 0; i < width + 1; i++) {
+            inbuf[i] = malloc(SUW_CHUNK_SIZE + SUW_TAGLEN);
+            if (inbuf[i] == NULL) {
+                alloc_ok = 0;
+            }
+        }
+        for (i = 0; i < width; i++) {
+            outbuf[i] = malloc(SUW_CHUNK_SIZE);
+            if (outbuf[i] == NULL) {
+                alloc_ok = 0;
+            }
+        }
+    }
+
+    if (!alloc_ok) {
+        result = SUW_ERR_MEMORY_ALLOCATION_FAILED;
         abort_output(&output);
-        secure_clear(key, sizeof(key));
-        return SUW_ERR_MEMORY_ALLOCATION_FAILED;
+        goto cleanup;
     }
 
     KeccakWidth1600_DWrapInstance dwu;
     SHAKE_Wrap_Initialize(&dwu, key, sizeof(key), SUW_TAGLEN, SUW_RHO, SUW_CAPACITY);
 
     uint64_t chunk_index = 0;
+    size_t   cur_len = 0;
+    int      cur_eof = 0;
 
-    size_t cur_len = 0;
-    int cur_eof = 0;
-
-    result = read_full_or_eof(input,
-                              C0,
-                              SUW_CHUNK_SIZE + SUW_TAGLEN,
-                              &cur_len,
-                              &cur_eof);
+    result = read_full_or_eof(input, inbuf[0], SUW_CHUNK_SIZE + SUW_TAGLEN,
+                              &cur_len, &cur_eof);
     if (result != SUW_OK) {
         goto done;
     }
@@ -652,84 +831,89 @@ suw_result_t decrypt_stream(FILE *input, const char *output_path, const char *ke
         goto done;
     }
 
-    while (1) {
-        size_t next_len = 0;
-        int next_eof = 0;
-        uint8_t final_flag = SUW_FINAL_FALSE;
+    int done_flag = 0;
+    while (!done_flag) {
+        size_t nb = 0;
 
-        result = read_full_or_eof(input,
-                                  C1,
-                                  SUW_CHUNK_SIZE + SUW_TAGLEN,
-                                  &next_len,
-                                  &next_eof);
-        if (result != SUW_OK) {
-            break;
+        while (1) {
+            size_t next_len = 0;
+            int next_eof = 0;
+            uint8_t final_flag;
+
+            result = read_full_or_eof(input, inbuf[nb + 1],
+                                      SUW_CHUNK_SIZE + SUW_TAGLEN,
+                                      &next_len, &next_eof);
+            if (result != SUW_OK) {
+                goto done;
+            }
+
+            final_flag = (next_len == 0 && next_eof) ? SUW_FINAL_TRUE
+                                                     : SUW_FINAL_FALSE;
+
+            if (cur_len < SUW_TAGLEN) {
+                result = SUW_ERR_INVALID_CIPHERTEXT;
+                goto done;
+            }
+            if (final_flag == SUW_FINAL_FALSE &&
+                cur_len != SUW_CHUNK_SIZE + SUW_TAGLEN) {
+                result = SUW_ERR_INVALID_CIPHERTEXT;
+                goto done;
+            }
+            if (final_flag == SUW_FINAL_TRUE &&
+                cur_len > SUW_CHUNK_SIZE + SUW_TAGLEN) {
+                result = SUW_ERR_INVALID_CIPHERTEXT;
+                goto done;
+            }
+            /* An empty final chunk is valid only for empty plaintext. */
+            if (final_flag == SUW_FINAL_TRUE &&
+                cur_len == SUW_TAGLEN &&
+                chunk_index != 0) {
+                result = SUW_ERR_INVALID_CIPHERTEXT;
+                goto done;
+            }
+
+            jobs[nb].base = &dwu;
+            jobs[nb].in = inbuf[nb];
+            jobs[nb].in_len = cur_len;
+            jobs[nb].out = outbuf[nb];
+            jobs[nb].chunk_index = chunk_index++;
+            jobs[nb].final_flag = final_flag;
+            jobs[nb].is_decrypt = 1;
+            jobs[nb].auth_ok = 0;
+            nb++;
+
+            if (final_flag == SUW_FINAL_TRUE) {
+                done_flag = 1;
+                break;
+            }
+
+            cur_len = next_len;
+            if (nb == width) {
+                break;
+            }
         }
 
-        if (next_len == 0 && next_eof) {
-            final_flag = SUW_FINAL_TRUE;
+        suw_run_batch(jobs, nb, nthreads);
+
+        for (i = 0; i < nb; i++) {
+            if (!jobs[i].auth_ok) {
+                result = SUW_ERR_AUTHENTICATION_FAILED;
+                goto done;
+            }
         }
 
-        if (cur_len < SUW_TAGLEN) {
-            result = SUW_ERR_INVALID_CIPHERTEXT;
-            break;
+        for (i = 0; i < nb; i++) {
+            result = write_all_file(output.fp, jobs[i].out, jobs[i].out_len);
+            if (result != SUW_OK) {
+                goto done;
+            }
         }
 
-        if (final_flag == SUW_FINAL_FALSE &&
-            cur_len != SUW_CHUNK_SIZE + SUW_TAGLEN) {
-            result = SUW_ERR_INVALID_CIPHERTEXT;
-            break;
+        if (!done_flag) {
+            uint8_t *tmp = inbuf[0];
+            inbuf[0] = inbuf[width];
+            inbuf[width] = tmp;
         }
-
-        if (final_flag == SUW_FINAL_TRUE &&
-            cur_len > SUW_CHUNK_SIZE + SUW_TAGLEN) {
-            result = SUW_ERR_INVALID_CIPHERTEXT;
-            break;
-        }
-
-        /*
-         * Enforce the age-style canonical rule:
-         * an empty final chunk is valid only for empty plaintext.
-         */
-        if (final_flag == SUW_FINAL_TRUE &&
-            cur_len == SUW_TAGLEN &&
-            chunk_index != 0) {
-            result = SUW_ERR_INVALID_CIPHERTEXT;
-            break;
-        }
-
-        make_chunk_aad(aad, chunk_index, final_flag);
-
-        if (SHAKE_Wrap_Unwrap(&dwu,
-                              P,
-                              aad,
-                              sizeof(aad),
-                              C0,
-                              cur_len) != 0) {
-            result = SUW_ERR_AUTHENTICATION_FAILED;
-            break;
-        }
-
-        result = write_all_file(output.fp, P, cur_len - SUW_TAGLEN);
-        if (result != SUW_OK) {
-            break;
-        }
-
-        if (final_flag == SUW_FINAL_TRUE) {
-            result = SUW_OK;
-            break;
-        }
-
-        chunk_index++;
-
-        {
-            uint8_t *tmp = C0;
-            C0 = C1;
-            C1 = tmp;
-        }
-
-        cur_len = next_len;
-        (void)next_eof;
     }
 
 done:
@@ -739,15 +923,27 @@ done:
         abort_output(&output);
     }
 
-    secure_clear(C0, SUW_CHUNK_SIZE + SUW_TAGLEN);
-    secure_clear(C1, SUW_CHUNK_SIZE + SUW_TAGLEN);
-    secure_clear(P, SUW_CHUNK_SIZE);
+cleanup:
+    if (inbuf != NULL) {
+        for (i = 0; i < width + 1; i++) {
+            if (inbuf[i] != NULL) {
+                secure_clear(inbuf[i], SUW_CHUNK_SIZE + SUW_TAGLEN);
+                free(inbuf[i]);
+            }
+        }
+        free(inbuf);
+    }
+    if (outbuf != NULL) {
+        for (i = 0; i < width; i++) {
+            if (outbuf[i] != NULL) {
+                secure_clear(outbuf[i], SUW_CHUNK_SIZE);
+                free(outbuf[i]);
+            }
+        }
+        free(outbuf);
+    }
+    free(jobs);
     secure_clear(key, sizeof(key));
-    secure_clear(aad, sizeof(aad));
-
-    free(C0);
-    free(C1);
-    free(P);
 
     return result;
 }

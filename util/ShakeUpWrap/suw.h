@@ -22,7 +22,16 @@ http://creativecommons.org/publicdomain/zero/1.0/
 #include <stdio.h>
 #include <stdint.h>
 
-#define SUW_CHUNK_SIZE (256ULL * 1024ULL * 1024ULL)
+/*
+ * The parallel build encrypts/decrypts independent chunks concurrently, so a
+ * smaller chunk gives more units of work and better core utilisation on
+ * moderate-sized files. Each chunk is wrapped from a freshly cloned keyed
+ * state (see suw.c), with the chunk index and final flag bound in the AAD.
+ */
+#define SUW_CHUNK_SIZE (4ULL * 1024ULL * 1024ULL)
+
+/* Upper bound on worker threads; the actual count tracks the online CPUs. */
+#define SUW_MAX_THREADS 64U
 
 #define SUW_KEY_SIZE   64U
 #define SUW_CAPACITY   512U
