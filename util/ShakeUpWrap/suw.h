@@ -38,7 +38,16 @@ http://creativecommons.org/publicdomain/zero/1.0/
 #define SUW_TAGLEN     (SUW_CAPACITY / 8U)
 #define SUW_RHO        ((1600U - SUW_CAPACITY - 64U) / 8U)
 
-#define SUW_AAD_SIZE    16U
+/*
+ * Each file carries a fresh random salt in a small header. The salt is bound
+ * into every chunk's AAD, so the per-chunk nonce is (salt, index, final)
+ * rather than just (index, final). This makes chunk nonces unique across files
+ * even if the same key were ever reused, and prevents moving an authenticated
+ * chunk from one file into another (cross-file splicing).
+ */
+#define SUW_SALT_SIZE   32U
+
+#define SUW_AAD_SIZE    48U
 #define SUW_FINAL_FALSE 0U
 #define SUW_FINAL_TRUE  1U
 

@@ -128,12 +128,14 @@ static void store_u64_le(uint8_t out[8], uint64_t x)
 }
 
 static void make_chunk_aad(uint8_t aad[SUW_AAD_SIZE],
+                           const uint8_t salt[SUW_SALT_SIZE],
                            uint64_t chunk_index,
                            uint8_t final_flag)
 {
     memset(aad, 0, SUW_AAD_SIZE);
-    store_u64_le(aad + 0, chunk_index);
-    aad[8] = final_flag;
+    memcpy(aad, salt, SUW_SALT_SIZE);
+    store_u64_le(aad + SUW_SALT_SIZE, chunk_index);
+    aad[SUW_SALT_SIZE + 8] = final_flag;
 }
 
 static suw_result_t write_all_fd(int fd, const uint8_t *buf, size_t len)
@@ -237,70 +239,67 @@ static suw_result_t read_full_or_eof(FILE *input,
 }
 
 /*
- * Parallel chunk processing.
+ * Parallel, pipelined chunk processing.
  *
- * ShakingUpAE's DWrap is a stateful duplex: calling Wrap/Unwrap evolves the
- * instance, so the original streaming format chains every chunk into a single
- * sequence and is therefore strictly serial. This build instead treats each
- * chunk as an independent message: every chunk is wrapped from a *clone* of the
- * initial keyed instance, with the chunk index and final flag bound in the AAD.
- * Independent chunks can then be encrypted/decrypted concurrently on a pool of
- * worker threads. The AAD still binds ordering and finality, so truncation,
- * reordering and tampering remain detectable exactly as before.
+ * ShakingUpAE's DWrap is a stateful duplex, so the original streaming format
+ * chains every chunk and is strictly serial. This build makes each chunk an
+ * independent message: it is wrapped from a *clone* of the initial keyed
+ * instance, with a per-file random salt plus the chunk index and final flag
+ * bound in the AAD. Independent chunks are processed by a pipeline that fully
+ * overlaps I/O with compute:
+ *
+ *   reader thread  -> bounded slot ring -> N compute workers -> ordered writer
+ *
+ * A dedicated reader streams chunks into a ring of slots; a pool of workers
+ * encrypts/decrypts whichever slots are ready; the writer (the calling thread)
+ * drains finished slots strictly in sequence order. Reads of upcoming chunks,
+ * the parallel crypto, and writes of finished chunks therefore all happen at
+ * the same time, removing the read/compute/write barrier of a batch design.
+ *
+ * The AAD still binds ordering and finality (and now the file salt), so
+ * truncation, reordering, cross-file splicing and tampering remain detectable.
  */
 
+typedef enum {
+    SUW_SLOT_EMPTY = 0,   /* free for the reader to use */
+    SUW_SLOT_RESERVED,    /* reader is reading into it */
+    SUW_SLOT_FILLED,      /* data ready, queued for a worker */
+    SUW_SLOT_COMPUTING,   /* a worker is processing it */
+    SUW_SLOT_DONE         /* processed, ready for the writer */
+} suw_slot_state_t;
+
 typedef struct {
+    uint8_t          *in;
+    uint8_t          *out;
+    size_t            in_len;
+    size_t            out_len;
+    uint64_t          seq;
+    uint8_t           final_flag;
+    int               auth_ok;
+    suw_slot_state_t  state;
+} suw_slot_t;
+
+typedef struct {
+    suw_slot_t *slots;
+    size_t      nslots;
+
     const KeccakWidth1600_DWrapInstance *base;
-    uint8_t       *in;        /* plaintext (encrypt) or ciphertext+tag (decrypt) */
-    size_t         in_len;
-    uint8_t       *out;       /* ciphertext+tag (encrypt) or plaintext (decrypt) */
-    size_t         out_len;
-    uint64_t       chunk_index;
-    uint8_t        final_flag;
-    int            is_decrypt;
-    int            auth_ok;    /* decrypt only: 1 if the tag verified */
-} suw_chunk_job_t;
+    const uint8_t *salt;
+    int         is_decrypt;
 
-typedef struct {
-    suw_chunk_job_t *jobs;
-    size_t           start;
-    size_t           end;
-} suw_worker_arg_t;
+    size_t     *queue;        /* FIFO of FILLED slot indices */
+    size_t      qhead;
+    size_t      qtail;
+    size_t      qcount;
 
-static void suw_process_job(suw_chunk_job_t *j)
-{
-    KeccakWidth1600_DWrapInstance local;
-    uint8_t aad[SUW_AAD_SIZE];
+    pthread_mutex_t mtx;
+    pthread_cond_t  slot_free;   /* a slot became EMPTY */
+    pthread_cond_t  work_avail;  /* queue non-empty OR shutdown */
+    pthread_cond_t  slot_done;   /* a slot became DONE */
 
-    SHAKE_Wrap_Clone(&local, j->base);
-    make_chunk_aad(aad, j->chunk_index, j->final_flag);
-
-    if (j->is_decrypt) {
-        if (SHAKE_Wrap_Unwrap(&local, j->out, aad, sizeof(aad),
-                              j->in, j->in_len) == 0) {
-            j->auth_ok = 1;
-            j->out_len = j->in_len - SUW_TAGLEN;
-        } else {
-            j->auth_ok = 0;
-            j->out_len = 0;
-        }
-    } else {
-        SHAKE_Wrap_Wrap(&local, j->out, aad, sizeof(aad), j->in, j->in_len);
-        j->out_len = j->in_len + SUW_TAGLEN;
-    }
-}
-
-static void *suw_worker_main(void *arg)
-{
-    suw_worker_arg_t *w = (suw_worker_arg_t *)arg;
-    size_t i;
-
-    for (i = w->start; i < w->end; i++) {
-        suw_process_job(&w->jobs[i]);
-    }
-
-    return NULL;
-}
+    int        error;         /* first suw_result_t failure, or SUW_OK */
+    int        shutdown;      /* workers should exit once the queue drains */
+} suw_pipeline_t;
 
 static unsigned suw_num_threads(void)
 {
@@ -316,58 +315,406 @@ static unsigned suw_num_threads(void)
     return (unsigned)n;
 }
 
-/* Process jobs[0..njobs) across up to nthreads worker threads, then return. */
-static void suw_run_batch(suw_chunk_job_t *jobs, size_t njobs, unsigned nthreads)
+static void suw_slot_process(suw_pipeline_t *p, suw_slot_t *s)
 {
-    pthread_t        threads[SUW_MAX_THREADS];
-    suw_worker_arg_t args[SUW_MAX_THREADS];
-    int              created[SUW_MAX_THREADS];
-    size_t           per, rem, start;
-    unsigned         t;
+    KeccakWidth1600_DWrapInstance local;
+    uint8_t aad[SUW_AAD_SIZE];
 
-    if (njobs == 0) {
-        return;
-    }
+    SHAKE_Wrap_Clone(&local, p->base);
+    make_chunk_aad(aad, p->salt, s->seq, s->final_flag);
 
-    if (nthreads < 1) {
-        nthreads = 1;
-    }
-    if ((size_t)nthreads > njobs) {
-        nthreads = (unsigned)njobs;
-    }
-
-    if (nthreads == 1) {
-        suw_worker_arg_t a = { jobs, 0, njobs };
-        suw_worker_main(&a);
-        return;
-    }
-
-    per = njobs / nthreads;
-    rem = njobs % nthreads;
-    start = 0;
-
-    for (t = 0; t < nthreads; t++) {
-        size_t count = per + (t < rem ? 1u : 0u);
-
-        args[t].jobs = jobs;
-        args[t].start = start;
-        args[t].end = start + count;
-        start += count;
-
-        if (pthread_create(&threads[t], NULL, suw_worker_main, &args[t]) == 0) {
-            created[t] = 1;
+    if (p->is_decrypt) {
+        if (SHAKE_Wrap_Unwrap(&local, s->out, aad, sizeof(aad),
+                              s->in, s->in_len) == 0) {
+            s->auth_ok = 1;
+            s->out_len = s->in_len - SUW_TAGLEN;
         } else {
-            /* Fall back to running this slice on the calling thread. */
-            created[t] = 0;
-            suw_worker_main(&args[t]);
+            s->auth_ok = 0;
+            s->out_len = 0;
+        }
+    } else {
+        SHAKE_Wrap_Wrap(&local, s->out, aad, sizeof(aad), s->in, s->in_len);
+        s->auth_ok = 1;
+        s->out_len = s->in_len + SUW_TAGLEN;
+    }
+}
+
+static void *suw_compute_worker(void *arg)
+{
+    suw_pipeline_t *p = (suw_pipeline_t *)arg;
+
+    for (;;) {
+        size_t idx;
+
+        pthread_mutex_lock(&p->mtx);
+        while (p->qcount == 0 && !p->shutdown) {
+            pthread_cond_wait(&p->work_avail, &p->mtx);
+        }
+        if (p->qcount == 0 && p->shutdown) {
+            pthread_mutex_unlock(&p->mtx);
+            break;
+        }
+        idx = p->queue[p->qhead];
+        p->qhead = (p->qhead + 1) % p->nslots;
+        p->qcount--;
+        p->slots[idx].state = SUW_SLOT_COMPUTING;
+        pthread_mutex_unlock(&p->mtx);
+
+        suw_slot_process(p, &p->slots[idx]);
+
+        pthread_mutex_lock(&p->mtx);
+        p->slots[idx].state = SUW_SLOT_DONE;
+        pthread_cond_broadcast(&p->slot_done);
+        pthread_mutex_unlock(&p->mtx);
+    }
+
+    return NULL;
+}
+
+/* Record the first failure and wake everyone so the pipeline unwinds. */
+static void suw_pipeline_fail(suw_pipeline_t *p, suw_result_t err)
+{
+    pthread_mutex_lock(&p->mtx);
+    if (p->error == SUW_OK) {
+        p->error = err;
+    }
+    pthread_cond_broadcast(&p->slot_free);
+    pthread_cond_broadcast(&p->work_avail);
+    pthread_cond_broadcast(&p->slot_done);
+    pthread_mutex_unlock(&p->mtx);
+}
+
+/* Reserve the slot for sequence number seq; returns SIZE_MAX on error/abort. */
+static size_t suw_reader_acquire(suw_pipeline_t *p, uint64_t seq)
+{
+    size_t idx = (size_t)(seq % p->nslots);
+
+    pthread_mutex_lock(&p->mtx);
+    while (p->slots[idx].state != SUW_SLOT_EMPTY && p->error == SUW_OK) {
+        pthread_cond_wait(&p->slot_free, &p->mtx);
+    }
+    if (p->error != SUW_OK) {
+        pthread_mutex_unlock(&p->mtx);
+        return SIZE_MAX;
+    }
+    p->slots[idx].state = SUW_SLOT_RESERVED;
+    pthread_mutex_unlock(&p->mtx);
+
+    return idx;
+}
+
+static void suw_reader_release(suw_pipeline_t *p, size_t idx)
+{
+    pthread_mutex_lock(&p->mtx);
+    p->slots[idx].state = SUW_SLOT_EMPTY;
+    pthread_cond_broadcast(&p->slot_free);
+    pthread_mutex_unlock(&p->mtx);
+}
+
+static void suw_reader_publish(suw_pipeline_t *p, size_t idx, uint64_t seq,
+                               size_t in_len, uint8_t final_flag)
+{
+    pthread_mutex_lock(&p->mtx);
+    p->slots[idx].seq = seq;
+    p->slots[idx].in_len = in_len;
+    p->slots[idx].final_flag = final_flag;
+    p->slots[idx].state = SUW_SLOT_FILLED;
+    p->queue[p->qtail] = idx;
+    p->qtail = (p->qtail + 1) % p->nslots;
+    p->qcount++;
+    pthread_cond_signal(&p->work_avail);
+    pthread_mutex_unlock(&p->mtx);
+}
+
+static suw_result_t suw_validate_dec_chunk(size_t cur_len, uint8_t final_flag,
+                                           uint64_t seq)
+{
+    if (cur_len < SUW_TAGLEN) {
+        return SUW_ERR_INVALID_CIPHERTEXT;
+    }
+    if (final_flag == SUW_FINAL_FALSE && cur_len != SUW_CHUNK_SIZE + SUW_TAGLEN) {
+        return SUW_ERR_INVALID_CIPHERTEXT;
+    }
+    if (final_flag == SUW_FINAL_TRUE && cur_len > SUW_CHUNK_SIZE + SUW_TAGLEN) {
+        return SUW_ERR_INVALID_CIPHERTEXT;
+    }
+    /* An empty final chunk is valid only for empty plaintext. */
+    if (final_flag == SUW_FINAL_TRUE && cur_len == SUW_TAGLEN && seq != 0) {
+        return SUW_ERR_INVALID_CIPHERTEXT;
+    }
+    return SUW_OK;
+}
+
+typedef struct {
+    suw_pipeline_t *p;
+    FILE           *input;
+    size_t          read_cap;
+} suw_reader_arg_t;
+
+static void *suw_reader_main(void *arg)
+{
+    suw_reader_arg_t *ra = (suw_reader_arg_t *)arg;
+    suw_pipeline_t   *p = ra->p;
+    FILE             *input = ra->input;
+    size_t            cap = ra->read_cap;
+
+    uint64_t     seq = 0;
+    size_t       pending_idx;
+    size_t       pending_len = 0;
+    size_t       len = 0;
+    int          eof = 0;
+    suw_result_t r;
+
+    pending_idx = suw_reader_acquire(p, 0);
+    if (pending_idx == SIZE_MAX) {
+        return NULL;
+    }
+
+    r = read_full_or_eof(input, p->slots[pending_idx].in, cap, &len, &eof);
+    if (r != SUW_OK) {
+        suw_pipeline_fail(p, r);
+        return NULL;
+    }
+
+    if (len == 0 && eof) {
+        if (p->is_decrypt) {
+            suw_pipeline_fail(p, SUW_ERR_INVALID_CIPHERTEXT);
+            return NULL;
+        }
+        /* Empty plaintext: a single empty final chunk. */
+        suw_reader_publish(p, pending_idx, 0, 0, SUW_FINAL_TRUE);
+        return NULL;
+    }
+    pending_len = len;
+
+    for (;;) {
+        size_t la_idx;
+        size_t next_len = 0;
+        int    next_eof = 0;
+        uint8_t final_flag;
+
+        la_idx = suw_reader_acquire(p, seq + 1);
+        if (la_idx == SIZE_MAX) {
+            return NULL;
+        }
+
+        r = read_full_or_eof(input, p->slots[la_idx].in, cap, &next_len, &next_eof);
+        if (r != SUW_OK) {
+            suw_reader_release(p, la_idx);
+            suw_pipeline_fail(p, r);
+            return NULL;
+        }
+
+        final_flag = (next_len == 0 && next_eof) ? SUW_FINAL_TRUE : SUW_FINAL_FALSE;
+
+        if (p->is_decrypt) {
+            suw_result_t v = suw_validate_dec_chunk(pending_len, final_flag, seq);
+            if (v != SUW_OK) {
+                suw_reader_release(p, la_idx);
+                suw_pipeline_fail(p, v);
+                return NULL;
+            }
+        }
+
+        suw_reader_publish(p, pending_idx, seq, pending_len, final_flag);
+
+        if (final_flag == SUW_FINAL_TRUE) {
+            suw_reader_release(p, la_idx);
+            return NULL;
+        }
+
+        pending_idx = la_idx;
+        pending_len = next_len;
+        seq++;
+    }
+}
+
+static suw_result_t suw_writer_run(suw_pipeline_t *p, suw_output_t *output)
+{
+    uint64_t     seq = 0;
+    suw_result_t result = SUW_OK;
+
+    for (;;) {
+        size_t  idx = (size_t)(seq % p->nslots);
+        uint8_t final_flag;
+        int     auth_ok;
+        size_t  out_len;
+
+        pthread_mutex_lock(&p->mtx);
+        while (p->slots[idx].state != SUW_SLOT_DONE && p->error == SUW_OK) {
+            pthread_cond_wait(&p->slot_done, &p->mtx);
+        }
+        if (p->slots[idx].state != SUW_SLOT_DONE) {
+            result = p->error;
+            pthread_mutex_unlock(&p->mtx);
+            break;
+        }
+        final_flag = p->slots[idx].final_flag;
+        auth_ok = p->slots[idx].auth_ok;
+        out_len = p->slots[idx].out_len;
+        pthread_mutex_unlock(&p->mtx);
+
+        if (p->is_decrypt && !auth_ok) {
+            result = SUW_ERR_AUTHENTICATION_FAILED;
+            break;
+        }
+
+        result = write_all_file(output->fp, p->slots[idx].out, out_len);
+        if (result != SUW_OK) {
+            break;
+        }
+
+        pthread_mutex_lock(&p->mtx);
+        p->slots[idx].state = SUW_SLOT_EMPTY;
+        pthread_cond_broadcast(&p->slot_free);
+        pthread_mutex_unlock(&p->mtx);
+
+        if (final_flag == SUW_FINAL_TRUE) {
+            break;
+        }
+        seq++;
+    }
+
+    if (result != SUW_OK) {
+        suw_pipeline_fail(p, result);
+    }
+
+    return result;
+}
+
+/*
+ * Run the encrypt/decrypt pipeline end to end. base is the initial keyed
+ * instance, salt the per-file salt; both are read-only and shared by workers.
+ */
+static suw_result_t suw_run_pipeline(FILE *input, suw_output_t *output,
+                                     const KeccakWidth1600_DWrapInstance *base,
+                                     const uint8_t *salt, int is_decrypt)
+{
+    suw_pipeline_t p;
+    unsigned       nthreads = suw_num_threads();
+    size_t         nslots = (size_t)nthreads * 2u;
+    size_t         in_cap = is_decrypt ? (SUW_CHUNK_SIZE + SUW_TAGLEN) : SUW_CHUNK_SIZE;
+    size_t         out_cap = is_decrypt ? SUW_CHUNK_SIZE : (SUW_CHUNK_SIZE + SUW_TAGLEN);
+    pthread_t      workers[SUW_MAX_THREADS];
+    unsigned       created = 0;
+    pthread_t      reader;
+    int            reader_started = 0;
+    suw_reader_arg_t ra;
+    suw_result_t   result = SUW_OK;
+    size_t         i;
+    int            mutex_ready = 0, c1 = 0, c2 = 0, c3 = 0;
+
+    if (nslots < 3) {
+        nslots = 3;
+    }
+
+    memset(&p, 0, sizeof(p));
+    p.nslots = nslots;
+    p.base = base;
+    p.salt = salt;
+    p.is_decrypt = is_decrypt;
+    p.error = SUW_OK;
+
+    p.slots = calloc(nslots, sizeof(*p.slots));
+    p.queue = calloc(nslots, sizeof(*p.queue));
+    if (p.slots == NULL || p.queue == NULL) {
+        result = SUW_ERR_MEMORY_ALLOCATION_FAILED;
+        goto cleanup;
+    }
+    for (i = 0; i < nslots; i++) {
+        p.slots[i].in = malloc(in_cap);
+        p.slots[i].out = malloc(out_cap);
+        if (p.slots[i].in == NULL || p.slots[i].out == NULL) {
+            result = SUW_ERR_MEMORY_ALLOCATION_FAILED;
+            goto cleanup;
         }
     }
 
-    for (t = 0; t < nthreads; t++) {
-        if (created[t]) {
-            pthread_join(threads[t], NULL);
+    if (pthread_mutex_init(&p.mtx, NULL) != 0) {
+        result = SUW_ERR_INTERNAL;
+        goto cleanup;
+    }
+    mutex_ready = 1;
+    if (pthread_cond_init(&p.slot_free, NULL) != 0 ||
+        (c1 = 1, pthread_cond_init(&p.work_avail, NULL) != 0) ||
+        (c2 = 1, pthread_cond_init(&p.slot_done, NULL) != 0)) {
+        result = SUW_ERR_INTERNAL;
+        goto cleanup;
+    }
+    c3 = 1;
+
+    for (i = 0; i < nthreads; i++) {
+        if (pthread_create(&workers[created], NULL, suw_compute_worker, &p) == 0) {
+            created++;
         }
     }
+    if (created == 0) {
+        result = SUW_ERR_INTERNAL;
+        goto cleanup;
+    }
+
+    ra.p = &p;
+    ra.input = input;
+    ra.read_cap = in_cap;
+    if (pthread_create(&reader, NULL, suw_reader_main, &ra) == 0) {
+        reader_started = 1;
+    } else {
+        result = SUW_ERR_INTERNAL;
+        suw_pipeline_fail(&p, result);
+    }
+
+    if (reader_started) {
+        result = suw_writer_run(&p, output);
+    }
+
+    /* Shut the workers down and join everything. */
+    pthread_mutex_lock(&p.mtx);
+    p.shutdown = 1;
+    pthread_cond_broadcast(&p.work_avail);
+    pthread_cond_broadcast(&p.slot_free);
+    pthread_cond_broadcast(&p.slot_done);
+    pthread_mutex_unlock(&p.mtx);
+
+    if (reader_started) {
+        pthread_join(reader, NULL);
+    }
+    for (i = 0; i < created; i++) {
+        pthread_join(workers[i], NULL);
+    }
+
+    if (result == SUW_OK && p.error != SUW_OK) {
+        result = p.error;
+    }
+
+cleanup:
+    if (c3) {
+        pthread_cond_destroy(&p.slot_done);
+    }
+    if (c2) {
+        pthread_cond_destroy(&p.work_avail);
+    }
+    if (c1) {
+        pthread_cond_destroy(&p.slot_free);
+    }
+    if (mutex_ready) {
+        pthread_mutex_destroy(&p.mtx);
+    }
+    if (p.slots != NULL) {
+        for (i = 0; i < nslots; i++) {
+            if (p.slots[i].in != NULL) {
+                secure_clear(p.slots[i].in, in_cap);
+                free(p.slots[i].in);
+            }
+            if (p.slots[i].out != NULL) {
+                secure_clear(p.slots[i].out, out_cap);
+                free(p.slots[i].out);
+            }
+        }
+        free(p.slots);
+    }
+    free(p.queue);
+
+    return result;
 }
 
 static suw_result_t check_key_does_not_exist(const char *key_path)
@@ -594,6 +941,7 @@ suw_result_t encrypt_stream(FILE *input, const char *output_path, const char *ke
 
     suw_result_t result = SUW_OK;
     uint8_t key[SUW_KEY_SIZE] = {0};
+    uint8_t salt[SUW_SALT_SIZE] = {0};
 
     suw_output_t output;
 
@@ -607,38 +955,18 @@ suw_result_t encrypt_stream(FILE *input, const char *output_path, const char *ke
         return result;
     }
 
-    unsigned nthreads = suw_num_threads();
-    size_t   width = nthreads;            /* chunks processed per batch */
-    size_t   i;
-
-    /* width + 1 input buffers (one extra for cross-batch read-ahead). */
-    uint8_t **inbuf = calloc(width + 1, sizeof(*inbuf));
-    uint8_t **outbuf = calloc(width, sizeof(*outbuf));
-    suw_chunk_job_t *jobs = calloc(width, sizeof(*jobs));
-    int alloc_ok = (inbuf != NULL && outbuf != NULL && jobs != NULL);
-
-    if (alloc_ok) {
-        for (i = 0; i < width + 1; i++) {
-            inbuf[i] = malloc(SUW_CHUNK_SIZE);
-            if (inbuf[i] == NULL) {
-                alloc_ok = 0;
-            }
-        }
-        for (i = 0; i < width; i++) {
-            outbuf[i] = malloc(SUW_CHUNK_SIZE + SUW_TAGLEN);
-            if (outbuf[i] == NULL) {
-                alloc_ok = 0;
-            }
-        }
-    }
-
-    if (!alloc_ok) {
-        result = SUW_ERR_MEMORY_ALLOCATION_FAILED;
-        abort_output(&output);
-        goto cleanup;
-    }
-
     result = create_and_write_key(key_path, key);
+    if (result != SUW_OK) {
+        goto done;
+    }
+
+    /* Fresh per-file salt, written as a header and bound into every chunk. */
+    if (getentropy(salt, sizeof(salt)) != 0) {
+        result = SUW_ERR_ENTROPY_FAILED;
+        goto done;
+    }
+
+    result = write_all_file(output.fp, salt, sizeof(salt));
     if (result != SUW_OK) {
         goto done;
     }
@@ -646,87 +974,7 @@ suw_result_t encrypt_stream(FILE *input, const char *output_path, const char *ke
     KeccakWidth1600_DWrapInstance dww;
     SHAKE_Wrap_Initialize(&dww, key, sizeof(key), SUW_TAGLEN, SUW_RHO, SUW_CAPACITY);
 
-    uint64_t chunk_index = 0;
-    size_t   cur_len = 0;
-    int      cur_eof = 0;
-
-    result = read_full_or_eof(input, inbuf[0], SUW_CHUNK_SIZE, &cur_len, &cur_eof);
-    if (result != SUW_OK) {
-        goto done;
-    }
-
-    /*
-     * Empty plaintext: emit exactly one empty final chunk. This is the only
-     * accepted empty-final-chunk encoding.
-     */
-    if (cur_len == 0 && cur_eof) {
-        jobs[0].base = &dww;
-        jobs[0].in = inbuf[0];
-        jobs[0].in_len = 0;
-        jobs[0].out = outbuf[0];
-        jobs[0].chunk_index = 0;
-        jobs[0].final_flag = SUW_FINAL_TRUE;
-        jobs[0].is_decrypt = 0;
-
-        suw_process_job(&jobs[0]);
-        result = write_all_file(output.fp, jobs[0].out, jobs[0].out_len);
-        goto done;
-    }
-
-    int done_flag = 0;
-    while (!done_flag) {
-        size_t nb = 0;
-
-        while (1) {
-            size_t next_len = 0;
-            int next_eof = 0;
-            uint8_t final_flag;
-
-            /* Read one chunk ahead to learn whether the current one is final. */
-            result = read_full_or_eof(input, inbuf[nb + 1], SUW_CHUNK_SIZE,
-                                      &next_len, &next_eof);
-            if (result != SUW_OK) {
-                goto done;
-            }
-
-            final_flag = (next_len == 0 && next_eof) ? SUW_FINAL_TRUE
-                                                     : SUW_FINAL_FALSE;
-
-            jobs[nb].base = &dww;
-            jobs[nb].in = inbuf[nb];
-            jobs[nb].in_len = cur_len;
-            jobs[nb].out = outbuf[nb];
-            jobs[nb].chunk_index = chunk_index++;
-            jobs[nb].final_flag = final_flag;
-            jobs[nb].is_decrypt = 0;
-            nb++;
-
-            if (final_flag == SUW_FINAL_TRUE) {
-                done_flag = 1;
-                break;
-            }
-
-            cur_len = next_len;       /* read-ahead chunk now sits in inbuf[nb] */
-            if (nb == width) {
-                break;                /* batch full; carry inbuf[width] below */
-            }
-        }
-
-        suw_run_batch(jobs, nb, nthreads);
-
-        for (i = 0; i < nb; i++) {
-            result = write_all_file(output.fp, jobs[i].out, jobs[i].out_len);
-            if (result != SUW_OK) {
-                goto done;
-            }
-        }
-
-        if (!done_flag) {
-            uint8_t *tmp = inbuf[0];
-            inbuf[0] = inbuf[width];
-            inbuf[width] = tmp;
-        }
-    }
+    result = suw_run_pipeline(input, &output, &dww, salt, 0);
 
 done:
     if (result == SUW_OK) {
@@ -735,27 +983,8 @@ done:
         abort_output(&output);
     }
 
-cleanup:
-    if (inbuf != NULL) {
-        for (i = 0; i < width + 1; i++) {
-            if (inbuf[i] != NULL) {
-                secure_clear(inbuf[i], SUW_CHUNK_SIZE);
-                free(inbuf[i]);
-            }
-        }
-        free(inbuf);
-    }
-    if (outbuf != NULL) {
-        for (i = 0; i < width; i++) {
-            if (outbuf[i] != NULL) {
-                secure_clear(outbuf[i], SUW_CHUNK_SIZE + SUW_TAGLEN);
-                free(outbuf[i]);
-            }
-        }
-        free(outbuf);
-    }
-    free(jobs);
     secure_clear(key, sizeof(key));
+    secure_clear(salt, sizeof(salt));
 
     return result;
 }
@@ -768,6 +997,7 @@ suw_result_t decrypt_stream(FILE *input, const char *output_path, const char *ke
 
     suw_result_t result = SUW_OK;
     uint8_t key[SUW_KEY_SIZE] = {0};
+    uint8_t salt[SUW_SALT_SIZE] = {0};
 
     suw_output_t output;
 
@@ -783,138 +1013,24 @@ suw_result_t decrypt_stream(FILE *input, const char *output_path, const char *ke
         return result;
     }
 
-    unsigned nthreads = suw_num_threads();
-    size_t   width = nthreads;
-    size_t   i;
+    /* Read the per-file salt header. */
+    {
+        size_t salt_len = 0;
+        int salt_eof = 0;
 
-    uint8_t **inbuf = calloc(width + 1, sizeof(*inbuf));
-    uint8_t **outbuf = calloc(width, sizeof(*outbuf));
-    suw_chunk_job_t *jobs = calloc(width, sizeof(*jobs));
-    int alloc_ok = (inbuf != NULL && outbuf != NULL && jobs != NULL);
-
-    if (alloc_ok) {
-        for (i = 0; i < width + 1; i++) {
-            inbuf[i] = malloc(SUW_CHUNK_SIZE + SUW_TAGLEN);
-            if (inbuf[i] == NULL) {
-                alloc_ok = 0;
-            }
+        result = read_full_or_eof(input, salt, sizeof(salt), &salt_len, &salt_eof);
+        if (result == SUW_OK && salt_len != sizeof(salt)) {
+            result = SUW_ERR_INVALID_CIPHERTEXT;
         }
-        for (i = 0; i < width; i++) {
-            outbuf[i] = malloc(SUW_CHUNK_SIZE);
-            if (outbuf[i] == NULL) {
-                alloc_ok = 0;
-            }
+        if (result != SUW_OK) {
+            goto done;
         }
-    }
-
-    if (!alloc_ok) {
-        result = SUW_ERR_MEMORY_ALLOCATION_FAILED;
-        abort_output(&output);
-        goto cleanup;
     }
 
     KeccakWidth1600_DWrapInstance dwu;
     SHAKE_Wrap_Initialize(&dwu, key, sizeof(key), SUW_TAGLEN, SUW_RHO, SUW_CAPACITY);
 
-    uint64_t chunk_index = 0;
-    size_t   cur_len = 0;
-    int      cur_eof = 0;
-
-    result = read_full_or_eof(input, inbuf[0], SUW_CHUNK_SIZE + SUW_TAGLEN,
-                              &cur_len, &cur_eof);
-    if (result != SUW_OK) {
-        goto done;
-    }
-
-    if (cur_len == 0 && cur_eof) {
-        result = SUW_ERR_INVALID_CIPHERTEXT;
-        goto done;
-    }
-
-    int done_flag = 0;
-    while (!done_flag) {
-        size_t nb = 0;
-
-        while (1) {
-            size_t next_len = 0;
-            int next_eof = 0;
-            uint8_t final_flag;
-
-            result = read_full_or_eof(input, inbuf[nb + 1],
-                                      SUW_CHUNK_SIZE + SUW_TAGLEN,
-                                      &next_len, &next_eof);
-            if (result != SUW_OK) {
-                goto done;
-            }
-
-            final_flag = (next_len == 0 && next_eof) ? SUW_FINAL_TRUE
-                                                     : SUW_FINAL_FALSE;
-
-            if (cur_len < SUW_TAGLEN) {
-                result = SUW_ERR_INVALID_CIPHERTEXT;
-                goto done;
-            }
-            if (final_flag == SUW_FINAL_FALSE &&
-                cur_len != SUW_CHUNK_SIZE + SUW_TAGLEN) {
-                result = SUW_ERR_INVALID_CIPHERTEXT;
-                goto done;
-            }
-            if (final_flag == SUW_FINAL_TRUE &&
-                cur_len > SUW_CHUNK_SIZE + SUW_TAGLEN) {
-                result = SUW_ERR_INVALID_CIPHERTEXT;
-                goto done;
-            }
-            /* An empty final chunk is valid only for empty plaintext. */
-            if (final_flag == SUW_FINAL_TRUE &&
-                cur_len == SUW_TAGLEN &&
-                chunk_index != 0) {
-                result = SUW_ERR_INVALID_CIPHERTEXT;
-                goto done;
-            }
-
-            jobs[nb].base = &dwu;
-            jobs[nb].in = inbuf[nb];
-            jobs[nb].in_len = cur_len;
-            jobs[nb].out = outbuf[nb];
-            jobs[nb].chunk_index = chunk_index++;
-            jobs[nb].final_flag = final_flag;
-            jobs[nb].is_decrypt = 1;
-            jobs[nb].auth_ok = 0;
-            nb++;
-
-            if (final_flag == SUW_FINAL_TRUE) {
-                done_flag = 1;
-                break;
-            }
-
-            cur_len = next_len;
-            if (nb == width) {
-                break;
-            }
-        }
-
-        suw_run_batch(jobs, nb, nthreads);
-
-        for (i = 0; i < nb; i++) {
-            if (!jobs[i].auth_ok) {
-                result = SUW_ERR_AUTHENTICATION_FAILED;
-                goto done;
-            }
-        }
-
-        for (i = 0; i < nb; i++) {
-            result = write_all_file(output.fp, jobs[i].out, jobs[i].out_len);
-            if (result != SUW_OK) {
-                goto done;
-            }
-        }
-
-        if (!done_flag) {
-            uint8_t *tmp = inbuf[0];
-            inbuf[0] = inbuf[width];
-            inbuf[width] = tmp;
-        }
-    }
+    result = suw_run_pipeline(input, &output, &dwu, salt, 1);
 
 done:
     if (result == SUW_OK) {
@@ -923,27 +1039,8 @@ done:
         abort_output(&output);
     }
 
-cleanup:
-    if (inbuf != NULL) {
-        for (i = 0; i < width + 1; i++) {
-            if (inbuf[i] != NULL) {
-                secure_clear(inbuf[i], SUW_CHUNK_SIZE + SUW_TAGLEN);
-                free(inbuf[i]);
-            }
-        }
-        free(inbuf);
-    }
-    if (outbuf != NULL) {
-        for (i = 0; i < width; i++) {
-            if (outbuf[i] != NULL) {
-                secure_clear(outbuf[i], SUW_CHUNK_SIZE);
-                free(outbuf[i]);
-            }
-        }
-        free(outbuf);
-    }
-    free(jobs);
     secure_clear(key, sizeof(key));
+    secure_clear(salt, sizeof(salt));
 
     return result;
 }
