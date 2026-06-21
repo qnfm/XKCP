@@ -14,8 +14,14 @@ It is designed as a streaming filter:
 From the XKCP repository root:
 
 ```sh
-make x86-64/ShakeUpWrap
+make x86-64/ShakeUpWrap EXTRA_LDFLAGS=-luring
 ```
+
+This build streams the plaintext through an asynchronous reader based on Linux
+[io_uring](https://en.wikipedia.org/wiki/Io_uring), so it requires `liburing`
+(install `liburing-dev` on Debian/Ubuntu) and a Linux kernel with io_uring
+support (5.1+). The `EXTRA_LDFLAGS=-luring` is needed to link against
+`liburing`.
 
 If the build system files are missing, initialize submodules first:
 
