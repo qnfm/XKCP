@@ -9,7 +9,7 @@ name = "shakeupwrap-rs"
 path = "src/main.rs"
 
 [dependencies]
-rayon = "1"
+crossbeam-channel = "0.5"
 
 [build-dependencies]
 cc = "1"
