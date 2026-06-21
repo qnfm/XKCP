@@ -358,14 +358,22 @@ static void *async_reader_thread_main(void *arg)
         slot->seq = reader->next_fill_seq++;
         slot->state = 1;
 
-        if (hit_eof) {
+        /*
+         * The consumer protocol always expects an explicit terminating
+         * zero-length EOF chunk to mark finality. A partial final chunk
+         * (len > 0 with hit_eof) must therefore still be followed by the
+         * empty terminator, so only stop producing once that terminator
+         * has been delivered. Otherwise the consumer would block waiting
+         * for a chunk that is never produced.
+         */
+        if (hit_eof && len == 0) {
             reader->done = 1;
         }
 
         pthread_cond_broadcast(&reader->can_drain);
         pthread_mutex_unlock(&reader->mutex);
 
-        if (hit_eof) {
+        if (hit_eof && len == 0) {
             break;
         }
     }
